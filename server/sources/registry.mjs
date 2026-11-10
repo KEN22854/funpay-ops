@@ -98,6 +98,25 @@ export const SOURCES = [
   manual('fp-other', 'FunPay (другой раздел)', 'https://funpay.com', ['currency', 'accounts', 'keys', 'skins'], 'перепродажа внутри FunPay: дешевле в одном разделе/у одного продавца — дороже в другом'),
 ];
 
+/**
+ * Что известно о товарах источника заранее (если продавец не написал в названии).
+ * type: key — ключ активации; gift — покупка в магазине и передача подарком; region — регион цены.
+ * Атрибут не указан — значит, неизвестен и берётся только из названия предложения.
+ */
+const KNOWN = {
+  steam: { platform: 'pc', region: 'ru', type: 'gift' },
+  gog: { platform: 'pc', region: 'ru', type: 'gift' },
+  gabestore: { platform: 'pc', type: 'key' },
+  'cs-1': { platform: 'pc', region: 'us', type: 'gift' },
+  'cs-7': { platform: 'pc', region: 'us', type: 'gift' },
+  'cs-25': { platform: 'pc', region: 'us' },
+  'cs-13': { platform: 'pc', region: 'us' },
+};
+for (const s of SOURCES) {
+  if (s.method === 'aggregator' && !KNOWN[s.id]) KNOWN[s.id] = { platform: 'pc', region: 'us', type: 'key' };
+  s.known = KNOWN[s.id] ?? {};
+}
+
 export const SOURCE_BY_ID = Object.fromEntries(SOURCES.map((s) => [s.id, s]));
 
 export const CATEGORIES = [

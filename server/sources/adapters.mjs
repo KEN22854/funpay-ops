@@ -111,7 +111,8 @@ const feeds = {
     return indexOf(raw, (r) =>
       r
         .filter((i) => i.min_price > 0)
-        .map((i) => ({ sourceId: 'skinport', title: i.market_hash_name, price: i.min_price, currency: 'RUB', url: i.item_page, stock: i.quantity })),
+        // version — фаза Doppler/Gamma Doppler (Phase 1…4, Ruby, Sapphire…); у остальных площадок её нет
+        .map((i) => ({ sourceId: 'skinport', title: i.market_hash_name, price: i.min_price, currency: 'RUB', url: i.item_page, stock: i.quantity, phase: i.version ?? null })),
     );
   },
   async tm(game) {

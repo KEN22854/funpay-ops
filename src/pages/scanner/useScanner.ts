@@ -1,34 +1,59 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, type CatalogGame, type Category, type Discovery, type Health, type ScanResult, type SourceInfo, type Watch } from '../../lib/api';
+import {
+  api,
+  type CatalogGame,
+  type Category,
+  type Discovery,
+  type Health,
+  type Opportunity,
+  type ScanResult,
+  type ServerHealth,
+  type ServerSettings,
+  type SourceInfo,
+  type Watch,
+} from '../../lib/api';
 
-/** Состояние сканера с сервера: здоровье, источники, список отслеживания, результаты, автопоиск. */
+/** Состояние сканера с сервера. Возможности считает сервер (core/engine.mjs) — здесь только отображение. */
 export function useScanner() {
-  const [health, setHealth] = useState<Health | null>(null);
+  const [health, setHealth] = useState<ServerHealth | null>(null);
   const [offline, setOffline] = useState<string | null>(null);
   const [sources, setSources] = useState<SourceInfo[]>([]);
-  const [categories, setCategories] = useState<{ id: Category; name: string }[]>([]);
+  const [sourceHealth, setSourceHealth] = useState<Record<string, Health>>({});
   const [watches, setWatches] = useState<Watch[]>([]);
   const [results, setResults] = useState<Record<string, ScanResult>>({});
   const [discoveries, setDiscoveries] = useState<Record<string, Discovery>>({});
+  const [opps, setOpps] = useState<Opportunity[]>([]);
+  const [oppsAt, setOppsAt] = useState<string | null>(null);
+  const [settings, setSettings] = useState<ServerSettings | null>(null);
   const [catalog, setCatalog] = useState<CatalogGame[] | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
-  const wasRunning = useRef(false);
+  const wasBusy = useRef(false);
+
+  const loadOpps = useCallback(async () => {
+    const o = await api.opportunities();
+    setOpps(o.items);
+    setOppsAt(o.generatedAt);
+  }, []);
 
   const reload = useCallback(async () => {
-    const [w, d] = await Promise.all([api.watches(), api.discoveries()]);
+    const [w, d, s, st] = await Promise.all([api.watches(), api.discoveries(), api.sources(), api.settings()]);
     setWatches(w.watches);
     setResults(w.results);
     setDiscoveries(d);
-  }, []);
+    setSources(s.sources);
+    setSourceHealth(s.health);
+    setSettings(st.settings);
+    await loadOpps();
+  }, [loadOpps]);
 
   const ping = useCallback(async () => {
     try {
       const h = await api.health();
       setHealth(h);
       setOffline(null);
-      // фоновый «скан всего» закончился — подтягиваем свежие результаты
-      if (wasRunning.current && !h.allRunning) await reload();
-      wasRunning.current = h.allRunning;
+      const busy = Boolean(h.working) || h.queue.length > 0;
+      if (wasBusy.current && !busy) await reload();
+      wasBusy.current = busy;
       return true;
     } catch (e) {
       setOffline((e as Error).message);
@@ -40,13 +65,9 @@ export function useScanner() {
     let alive = true;
     (async () => {
       if (!(await ping()) || !alive) return;
-      const s = await api.sources();
-      if (!alive) return;
-      setSources(s.sources);
-      setCategories(s.categories);
       await reload();
     })().catch((e) => setOffline((e as Error).message));
-    const t = setInterval(ping, 10_000);
+    const t = setInterval(ping, 5_000);
     return () => {
       alive = false;
       clearInterval(t);
@@ -75,50 +96,72 @@ export function useScanner() {
     return saved;
   }, []);
 
-  const removeWatch = useCallback(async (id: string) => {
-    await api.removeWatch(id);
-    setWatches((l) => l.filter((w) => w.id !== id));
-    setResults((r) => {
-      const n = { ...r };
-      delete n[id];
-      return n;
-    });
-  }, []);
+  const removeWatch = useCallback(
+    async (id: string) => {
+      await api.removeWatch(id);
+      setWatches((l) => l.filter((w) => w.id !== id));
+      await loadOpps();
+    },
+    [loadOpps],
+  );
 
-  const scan = useCallback(async (id: string) => {
-    const r = await api.scan(id);
-    setResults((x) => ({ ...x, [id]: r }));
-    return r;
-  }, []);
+  const scan = useCallback(
+    async (id: string) => {
+      const r = await api.scan(id);
+      setResults((x) => ({ ...x, [id]: r }));
+      const s = await api.sources();
+      setSourceHealth(s.health);
+      await loadOpps();
+      return r;
+    },
+    [loadOpps],
+  );
 
   const scanAll = useCallback(async () => {
     await api.scanAll();
-    wasRunning.current = true;
+    wasBusy.current = true;
     await ping();
   }, [ping]);
 
-  const discover = useCallback(async (game: Parameters<typeof api.discover>[0], url: string, onlineOnly: boolean) => {
-    const d = await api.discover(game, url, onlineOnly);
-    setDiscoveries((x) => ({ ...x, [`${game}|${url}`]: d }));
-    return d;
-  }, []);
-
-  const setIntervalMin = useCallback(
-    async (m: number) => {
-      await api.setInterval(m);
-      await ping();
+  const decide = useCallback(
+    async (watchId: string, offerUrl: string, side: 'source' | 'funpay', status: 'VERIFIED' | 'REJECTED' | 'CLEAR', reason?: string) => {
+      await api.match(watchId, offerUrl, side, status, reason);
+      await scan(watchId);
     },
-    [ping],
+    [scan],
+  );
+
+  const discover = useCallback(
+    async (game: Parameters<typeof api.discover>[0], url: string, onlineOnly: boolean) => {
+      const d = await api.discover(game, url, onlineOnly);
+      setDiscoveries((x) => ({ ...x, [`${game}|${url}`]: d }));
+      await loadOpps();
+      return d;
+    },
+    [loadOpps],
+  );
+
+  const saveSettings = useCallback(
+    async (p: Partial<ServerSettings> | Record<string, unknown>) => {
+      const s = await api.saveSettings(p);
+      setSettings(s);
+      await loadOpps();
+      return s;
+    },
+    [loadOpps],
   );
 
   return {
     health,
     offline,
     sources,
-    categories,
+    sourceHealth,
     watches,
     results,
     discoveries,
+    opps,
+    oppsAt,
+    settings,
     catalog,
     catalogError,
     loadCatalog,
@@ -126,9 +169,11 @@ export function useScanner() {
     removeWatch,
     scan,
     scanAll,
+    decide,
     discover,
-    setIntervalMin,
+    saveSettings,
     reload,
+    loadOpps,
   };
 }
 
@@ -139,4 +184,13 @@ export const CATEGORY_LABEL: Record<Category, string> = {
   skins: 'Скины',
   currency: 'Валюта',
   accounts: 'Аккаунты/услуги',
+  subscriptions: 'Подписки',
 };
+
+export const MATCH_LABEL = { VERIFIED: 'совпадает', REVIEW_REQUIRED: 'проверить', REJECTED: 'не совпадает' } as const;
+export const MATCH_TONE = { VERIFIED: 'good', REVIEW_REQUIRED: 'warn', REJECTED: 'bad' } as const;
+export const STATUS_LABEL = { RECOMMENDED: 'Рекомендовано', REVIEW: 'Проверить', BLOCKED: 'Заблокировано' } as const;
+export const STATUS_TONE = { RECOMMENDED: 'good', REVIEW: 'warn', BLOCKED: 'bad' } as const;
+
+export const ageText = (min: number) =>
+  !Number.isFinite(min) ? 'нет данных' : min < 1 ? 'только что' : min < 60 ? `${Math.round(min)} мин назад` : min < 1440 ? `${(min / 60).toFixed(1)} ч назад` : `${(min / 1440).toFixed(1)} дн назад`;

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeCategoryUrl, parsePrice, summarize } from './lib/funpay.mjs';
-import { norm, passes, queryTokens, skinInText, tokens } from './lib/match.mjs';
-import { toRub } from './lib/rates.mjs';
-import { sanitizeWatch } from './lib/store.mjs';
-import { SOURCES } from './sources/registry.mjs';
-import { ADAPTERS } from './sources/adapters.mjs';
+import { normalizeCategoryUrl, parsePrice, summarize } from '../lib/funpay.mjs';
+import { norm, passes, queryTokens, skinInText, tokens } from '../lib/match.mjs';
+import { toRub } from '../lib/rates.mjs';
+import { sanitizeWatch } from '../repo/watches.mjs';
+import { SOURCES } from '../sources/registry.mjs';
+import { ADAPTERS } from '../sources/adapters.mjs';
 
 describe('реестр источников', () => {
   it('не меньше 50 источников, id уникальны, у автоматических есть адаптер', () => {

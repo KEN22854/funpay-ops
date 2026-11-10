@@ -1,4 +1,5 @@
 import { Card, NumberField, Page } from '../components/ui';
+import { ServerAdmin } from './settings/ServerAdmin';
 import { downloadText, STORAGE_KEY } from '../lib/storage';
 import { todayISO } from '../lib/format';
 import { migrateState, normalizeDeal, useStore } from '../store/useStore';
@@ -116,6 +117,8 @@ export default function Settings() {
           </button>
         </Card>
       </div>
+      <h2 className="pt-4 text-lg font-semibold">Сервер: склад, бэкапы, уведомления</h2>
+      <ServerAdmin />
     </Page>
   );
 }

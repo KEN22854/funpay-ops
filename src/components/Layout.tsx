@@ -4,6 +4,7 @@ import { useStore } from '../store/useStore';
 
 const NAV = [
   { to: '/scanner', label: 'Сканер выгоды' },
+  { to: '/inventory', label: 'Склад и финансы' },
   { to: '/calculator', label: 'Калькулятор' },
   { to: '/journal', label: 'Журнал' },
   { to: '/auto-delivery', label: 'Автовыдача' },

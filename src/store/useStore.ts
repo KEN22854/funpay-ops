@@ -2,7 +2,6 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { DisputeOutcome, MarginInput, MarginResult } from '../lib/margin';
 import { safeStorage, STORAGE_KEY, uid } from '../lib/storage';
-import { DEFAULT_ARB, type ArbSettings } from '../lib/arbitrage';
 
 export type Theme = 'dark' | 'light';
 
@@ -54,10 +53,7 @@ interface State {
   calcs: SavedCalc[];
   deals: Deal[];
   delivery: DeliveryDraft;
-  /** настройки расчёта выгоды в сканере */
-  arb: ArbSettings;
 
-  setArb: (p: Partial<ArbSettings>) => void;
   setSettings: (p: Partial<Settings>) => void;
   setCalcDraft: (p: Partial<MarginInput>) => void;
   /** заменить черновик целиком (из журнала / сохранённого расчёта) */
@@ -158,9 +154,7 @@ export const useStore = create<State>()(
       calcs: [],
       deals: [],
       delivery: EMPTY_DELIVERY,
-      arb: DEFAULT_ARB,
 
-      setArb: (p) => set((s) => ({ arb: { ...s.arb, ...p, sourceFees: { ...s.arb.sourceFees, ...p.sourceFees } } })),
       setSettings: (p) => set((s) => ({ settings: { ...s.settings, ...p } })),
       setCalcDraft: (p) => set((s) => ({ calcDraft: { ...s.calcDraft, ...p } })),
       replaceCalcDraft: (p) => set((s) => ({ calcDraft: { ...emptyCalc(s.settings), ...p } })),
@@ -208,7 +202,6 @@ export const useStore = create<State>()(
           calcs: [],
           deals: [],
           delivery: EMPTY_DELIVERY,
-          arb: DEFAULT_ARB,
         }),
     }),
     {
@@ -222,7 +215,6 @@ export const useStore = create<State>()(
         calcs: s.calcs,
         deals: s.deals,
         delivery: s.delivery,
-        arb: s.arb,
       }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<State>;
@@ -234,7 +226,6 @@ export const useStore = create<State>()(
           deals: Array.isArray(p.deals) ? p.deals.map(normalizeDeal) : current.deals,
           calcs: Array.isArray(p.calcs) ? p.calcs : current.calcs,
           delivery: { ...current.delivery, ...p.delivery },
-          arb: { ...current.arb, ...p.arb, sourceFees: { ...current.arb.sourceFees, ...p.arb?.sourceFees } },
         };
       },
     },
