@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root,
+:root[data-theme='dark'] {
+  --bg: 11 12 16;
+  --surface: 19 21 28;
+  --raised: 27 30 40;
+  --line: 42 46 60;
+  --fg: 230 232 240;
+  --muted: 140 146 166;
+  --accent: 99 102 241;
+  --good: 34 197 94;
+  --warn: 234 179 8;
+  --bad: 239 68 68;
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg: 245 246 250;
+  --surface: 255 255 255;
+  --raised: 238 240 246;
+  --line: 218 221 232;
+  --fg: 20 22 30;
+  --muted: 96 102 122;
+  --accent: 79 70 229;
+  --good: 22 163 74;
+  --warn: 202 138 4;
+  --bad: 220 38 38;
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-bg text-fg font-sans antialiased;
+}
+
+.num {
+  @apply font-mono tabular-nums;
+}
+
+@layer components {
+  .card {
+    @apply min-w-0 rounded-xl border border-line bg-surface;
+  }
+  .input {
+    @apply w-full rounded-lg border border-line bg-raised px-3 py-2 text-sm text-fg outline-none transition
+      placeholder:text-muted/70 focus:border-accent focus:ring-2 focus:ring-accent/30;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition
+      disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-white hover:bg-accent/90;
+  }
+  .btn-ghost {
+    @apply btn border border-line bg-raised text-fg hover:border-accent/60;
+  }
+  .btn-danger {
+    @apply btn border border-bad/40 bg-bad/10 text-bad hover:bg-bad/20;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-muted;
+  }
+  .table {
+    @apply w-full text-left text-sm;
+  }
+  .table th {
+    @apply border-b border-line px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted;
+  }
+  .table td {
+    @apply border-b border-line/60 px-3 py-2 align-top;
+  }
+  .table td.num {
+    @apply whitespace-nowrap;
+  }
+}
