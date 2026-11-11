@@ -398,7 +398,7 @@ describe('бэктест: исторические параметры и реа�
     expect(t.net).toBeLessThan(t.forecastNet);
     // поставка через 4 дня — продать уже не успеваем, остаётся только выход по рынку
     const late = runBacktest({ horizonDays: 7, sinceDays: 30, save: false, deliveryDelayH: 96 }).trades.find((x) => x.strategy === 'fast');
-    expect(late.fillProbability).toBe(0);
+    expect(late.fillProbability).toBeCloseTo(0, 6); // снимки создаются с разницей в миллисекунды
     expect(late.net).toBeLessThan(0);
     expect(r.breakdown.fast.byRegime).toBeTruthy();
     expect(r.breakdown.fast.byCategory.keys.trades).toBe(1);
@@ -406,7 +406,7 @@ describe('бэктест: исторические параметры и реа�
 
   it('бюджет и одновременные позиции ограничивают входы; нулевой остаток — не вход', () => {
     const { snap } = seedHistory();
-    snap(ago(10), 'source', 'steam', 510);
+    snap(ago(10.001), 'source', 'steam', 510); // котировка раньше снимка FunPay — иначе тест зависит от миллисекунд
     const all3 = runBacktest({ horizonDays: 7, sinceDays: 30, save: false });
     expect(all3.strategies.fast.trades).toBe(2);
     const one1 = runBacktest({ horizonDays: 7, sinceDays: 30, save: false, maxConcurrent: 1 });
