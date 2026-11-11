@@ -175,6 +175,7 @@ export function createPurchase(b) {
       status === 'received' ? at : null,
       str(b.note) || null,
     );
+    if (b.category) run('UPDATE purchases SET category = ? WHERE id = ?', str(b.category, 30), id);
     if (status === 'received') run("INSERT INTO stock_movements(item, mode, purchase_id, type, qty, unit_cost_rub, ts) VALUES (?, ?, ?, 'receive', ?, ?, ?)", item, mode, id, qty, total / qty, at);
     ledger(mode, 'purchase', -total, id, item);
     audit('purchase.create', 'purchase', id, { item, qty, total, mode, status });
@@ -182,15 +183,25 @@ export function createPurchase(b) {
   });
 }
 
-export function receivePurchase(id) {
+/**
+ * Получение партии. qty меньше заказанного — частичное исполнение: недопоставленные единицы
+ * возвращаются в кассу по цене товара (комиссии покупки не возвращаются и ложатся на полученные единицы).
+ */
+export function receivePurchase(id, { qty } = {}) {
   return tx(() => {
     const p = one('SELECT * FROM purchases WHERE id = ?', id);
     if (!p) throw err('закупка не найдена', 404);
     if (p.status !== 'in_transit') throw err('закупка уже получена или отменена', 409);
+    const got = qty === undefined || qty === null || qty === '' ? p.qty : num(qty, 'получено', { min: 1, int: true });
+    if (got > p.qty) throw err(`получено больше заказанного (${p.qty})`);
     const at = nowIso();
-    run("UPDATE purchases SET status = 'received', received_at = ? WHERE id = ?", at, id);
-    run("INSERT INTO stock_movements(item, mode, purchase_id, type, qty, unit_cost_rub, ts) VALUES (?, ?, ?, 'receive', ?, ?, ?)", p.item, p.mode, id, p.qty, p.unit_cost_rub, at);
-    audit('purchase.receive', 'purchase', id);
+    const missing = p.qty - got;
+    const refund = missing * p.unit_price * p.fx_rate * (1 + p.fx_spread_pct / 100);
+    const unitCost = (p.total_cost_rub - refund) / got;
+    run("UPDATE purchases SET status = 'received', received_at = ?, received_qty = ? WHERE id = ?", at, got, id);
+    run("INSERT INTO stock_movements(item, mode, purchase_id, type, qty, unit_cost_rub, ts) VALUES (?, ?, ?, 'receive', ?, ?, ?)", p.item, p.mode, id, got, unitCost, at);
+    if (missing > 0) ledger(p.mode, 'purchase_partial_refund', refund, id, `${p.item}: недопоставка ${missing} шт`);
+    audit('purchase.receive', 'purchase', id, { ordered: p.qty, received: got, refund });
     return one('SELECT * FROM purchases WHERE id = ?', id);
   });
 }

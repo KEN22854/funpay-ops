@@ -189,8 +189,14 @@ export const CATEGORY_LABEL: Record<Category, string> = {
 
 export const MATCH_LABEL = { VERIFIED: 'совпадает', REVIEW_REQUIRED: 'проверить', REJECTED: 'не совпадает' } as const;
 export const MATCH_TONE = { VERIFIED: 'good', REVIEW_REQUIRED: 'warn', REJECTED: 'bad' } as const;
-export const STATUS_LABEL = { RECOMMENDED: 'Рекомендовано', REVIEW: 'Проверить', BLOCKED: 'Заблокировано' } as const;
-export const STATUS_TONE = { RECOMMENDED: 'good', REVIEW: 'warn', BLOCKED: 'bad' } as const;
+export const STATUS_LABEL = { RECOMMENDED: 'Исполнимо', CANDIDATE: 'Кандидат', REVIEW: 'Проверить', BLOCKED: 'Заблокировано' } as const;
+export const STATUS_TONE = { RECOMMENDED: 'good', CANDIDATE: 'accent', REVIEW: 'warn', BLOCKED: 'bad' } as const;
+export const STATUS_HINT = {
+  RECOMMENDED: 'все проверки пройдены, цена перепроверена и наличие подтверждено — можно покупать',
+  CANDIDATE: 'все проверки пройдены по котировкам; перед покупкой нажмите «Проверить сейчас»',
+  REVIEW: 'нужно ваше решение: совпадение товара, правила площадки или качество данных',
+  BLOCKED: 'жёсткий блок: несовпадение, устаревшие данные, убыток, лимиты капитала',
+} as const;
 
 export const ageText = (min: number) =>
   !Number.isFinite(min) ? 'нет данных' : min < 1 ? 'только что' : min < 60 ? `${Math.round(min)} мин назад` : min < 1440 ? `${(min / 60).toFixed(1)} ч назад` : `${(min / 1440).toFixed(1)} дн назад`;

@@ -7,6 +7,7 @@ import { norm, passes, queryTokens, skinInText, tokens } from './lib/match.mjs';
 import { getRates, toRub } from './lib/rates.mjs';
 import { observeSectionFee } from './repo/fees.mjs';
 import { circuitOpen, recordHealth } from './repo/health.mjs';
+import { assessOffers } from './repo/quality.mjs';
 import { snapshotFunpay, snapshotSource } from './repo/history.mjs';
 import { decisions } from './repo/watches.mjs';
 import { getSettings } from './repo/settings.mjs';
@@ -73,6 +74,7 @@ function matchSourceOffer(watch, o, dec) {
     nameExact: watch.category === 'skins' ? norm(o.title) === norm(watch.query) : undefined,
     phase: o.phase,
     decision: dec[o.url],
+    skinsStrict: getSettings().matching.skinsStrict,
   });
 }
 
@@ -106,21 +108,31 @@ export async function scanWatch(watch) {
       try {
         const offers = await ADAPTERS[adapter]({ query: watch.query, game: watch.game, category: watch.category });
         const fetchedAt = new Date().toISOString();
-        const counts = Object.fromEntries(ids.map((id) => [id, 0]));
-        for (const o of offers) {
-          const slot = perSource[o.sourceId];
-          if (!slot) continue;
-          counts[o.sourceId]++;
-          if (!isSkin && !passes(o.title, include, exclude)) continue;
-          if (ignored.has(o.url)) continue;
-          const priceRub = toRub(o.price, o.currency, rates);
-          if (priceRub === null || !(priceRub > 0)) continue;
-          const fxRate = o.currency === 'RUB' ? 1 : rates[o.currency];
-          const match = matchSourceOffer(watch, o, dec);
-          if (match.status === 'REJECTED') slot.rejected++;
-          slot.offers.push({ ...o, priceRub, fxRate, fetchedAt, match });
+        const raw = Object.fromEntries(ids.map((id) => [id, []]));
+        for (const o of offers) if (raw[o.sourceId]) raw[o.sourceId].push({ ...o, priceRub: toRub(o.price, o.currency, rates) ?? 0 });
+        for (const id of ids) {
+          const slot = perSource[id];
+          // качество данных — по всем ответам источника, до фильтрации по словам
+          const list = raw[id].sort((a, b) => (a.priceRub || Infinity) - (b.priceRub || Infinity));
+          const q = assessOffers(list, { watchId: watch.id, sourceId: id, ratesDate });
+          list.forEach((o, i) => {
+            if (!isSkin && !passes(o.title, include, exclude)) return;
+            if (ignored.has(o.url)) return;
+            if (!(o.priceRub > 0)) return;
+            const fxRate = o.currency === 'RUB' ? 1 : rates[o.currency];
+            const match = matchSourceOffer(watch, o, dec);
+            if (match.status === 'REJECTED') slot.rejected++;
+            slot.offers.push({ ...o, fxRate, fetchedAt, match, dq: q.issues[i] });
+          });
+          recordHealth(id, {
+            ok: true,
+            latencyMs: Date.now() - t0,
+            items: list.length,
+            dqChecked: q.checked,
+            dqIssues: q.withIssues,
+            dqDetail: q.withIssues ? JSON.stringify([...new Set(q.issues.flat())].slice(0, 5)) : null,
+          });
         }
-        for (const id of ids) recordHealth(id, { ok: true, latencyMs: Date.now() - t0, items: counts[id] });
       } catch (e) {
         for (const id of ids) {
           Object.assign(perSource[id], { status: 'error', error: e.message, errorClass: errClass(e) });
@@ -171,7 +183,10 @@ export async function scanWatch(watch) {
       // конкуренты тоже сверяются по атрибутам: чужое издание/регион не должно задавать цену
       const matched = candidates.map((o) => ({
         ...o,
-        match: matchOffer(funpayAttrs(o), watch.attrs ?? {}, { category: watch.category, side: 'funpay', title: o.desc, nameExact: isSkin ? true : undefined, decision: dec[o.url] }),
+        match: (() => {
+          const fa = funpayAttrs(o);
+          return matchOffer(fa, watch.attrs ?? {}, { category: watch.category, side: 'funpay', title: o.desc, nameExact: isSkin ? true : undefined, decision: dec[o.url], float: fa.float });
+        })(),
       }));
       const market = matched.filter((o) => o.match.status !== 'REJECTED');
       snapshotFunpay(watch.id, market, { expectedGapMin: S.intervalMin || 60 });

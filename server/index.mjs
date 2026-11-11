@@ -23,9 +23,20 @@ import { abcXyz, comparePeriods, exportCsv, metrics, recommendationQuality } fro
 import { createBackup, listBackups, pruneBackups, restoreBackup, verifyBackup } from './repo/backup.mjs';
 import { botInfo, escape, notify, recentNotifications, send, setToken, startBot, telegramConfigured } from './notify/telegram.mjs';
 import { STATUS } from './core/engine.mjs';
+import { ENGINE_VERSION } from './core/finance.mjs';
+import { verifyOpportunity } from './verify.mjs';
+import { recordAttempt, sourceQuality } from './repo/quality.mjs';
+import { aging, capitalSnapshot, cashFlowForecast, listCashReservations, releaseCash, reserveCash } from './repo/risk.mjs';
+import { priceBands, sellProbability, weekdayProfile } from './repo/demand.mjs';
+import { closeDuePaper, paperStats } from './repo/paper.mjs';
+import { backtestRuns, runBacktest } from './repo/backtest.mjs';
+import { productMetrics } from './repo/metrics.mjs';
+import { authEnabled, checkAuth, login, logout, rateLimit } from './lib/auth.mjs';
 
 const PORT = Number(process.env.FPO_PORT || 5181);
-const HOST = '127.0.0.1';
+// по умолчанию — только локально; сервер в сети (FPO_HOST) требует FPO_AUTH_TOKEN — см. docs/DEPLOY.md
+const HOST = process.env.FPO_HOST || '127.0.0.1';
+const PUBLIC_HOSTS = (process.env.FPO_PUBLIC_HOSTS || '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 const UI_PORTS = [PORT, 5180];
 
@@ -120,14 +131,14 @@ async function afterScan(w, r) {
   const opps = buildOpportunities({ log: true }).filter((o) => o.watchId === w.id);
   for (const o of opps) {
     const f = o.eval.forecast;
-    if (o.eval.status === STATUS.RECOMMENDED && f && f.net >= N.minNet) {
+    if ([STATUS.RECOMMENDED, STATUS.CANDIDATE].includes(o.eval.status) && f && f.net >= N.minNet) {
       await notify(
         'opportunity',
         `rec:${o.id}`,
-        `🟢 <b>${escape(o.name)}</b>\nКупить: ${escape(o.buy.sourceId)} за ${o.buy.priceRub.toFixed(0)} ₽\nПродать: ${f.price} ₽ · чистыми ≈ ${f.net.toFixed(0)} ₽ (${f.netPct.toFixed(1)}%)\nБалл ${o.eval.score.toFixed(0)} · данные ${Math.round(o.eval.ages.sourceMin)} мин\n${escape(o.buy.url ?? '')}`,
+        `${o.eval.status === STATUS.RECOMMENDED ? '🟢 Исполнимо' : '🟡 Кандидат — перепроверьте перед покупкой'}\n<b>${escape(o.name)}</b>\nКупить: ${escape(o.buy.sourceId)} за ${o.buy.priceRub.toFixed(0)} ₽\nПродать: ${f.price} ₽ · чистыми ≈ ${f.net.toFixed(0)} ₽ (${f.netPct.toFixed(1)}%)\nБалл ${o.eval.score.toFixed(0)} · данные ${Math.round(o.eval.ages.sourceMin)} мин\n${escape(o.buy.url ?? '')}`,
       );
     }
-    const wasRec = one("SELECT status FROM recommendations WHERE id = ? AND status = 'RECOMMENDED'", o.id);
+    const wasRec = one("SELECT status FROM recommendations WHERE id = ? AND status IN ('RECOMMENDED', 'CANDIDATE')", o.id);
     if (wasRec && o.eval.status === STATUS.BLOCKED && o.eval.blocks.some((b) => b.startsWith('отрицательная'))) {
       await notify('negative', `neg:${o.id}:${nowIso().slice(0, 10)}`, `🔴 <b>${escape(o.name)}</b>: связка стала убыточной (${escape(o.eval.blocks[0])})`);
       require0(o.id);
@@ -188,6 +199,12 @@ function maintenance() {
         notify('backup', `backupfail:${nowIso().slice(0, 13)}`, `❗ Бэкап не создан: ${escape(e.message)}`);
       }
     }
+  }
+  try {
+    const n = closeDuePaper();
+    if (n) log(`paper trading: закрыто позиций ${n}`);
+  } catch (e) {
+    log('paper trading:', e.message);
   }
   pruneHealth(30);
   prunesnapshots(120);
@@ -261,7 +278,7 @@ async function withFx(b) {
 }
 
 const routes = [
-  ['GET', /^\/api\/health$/, () => ({ ok: true, version: 2, schema: schemaVersion(), working, queue: [...queue], lastCycle, settings: { intervalMin: getSettings().intervalMin }, cache: cacheStats(), telegram: telegramConfigured() })],
+  ['GET', /^\/api\/health$/, () => ({ ok: true, version: 2, engine: ENGINE_VERSION, auth: authEnabled(), schema: schemaVersion(), working, queue: [...queue], lastCycle, settings: { intervalMin: getSettings().intervalMin }, cache: cacheStats(), telegram: telegramConfigured() })],
   ['GET', /^\/api\/diagnostics$/, () => diagnostics()],
   ['GET', /^\/api\/sources$/, () => ({ categories: CATEGORIES, sources: SOURCES.map(({ adapter, ...s }) => ({ ...s, auto: !!adapter })), health: allHealth(['funpay', ...SOURCES.map((s) => s.id)]) })],
   ['GET', /^\/api\/rates$/, () => getRates()],
@@ -310,7 +327,10 @@ const routes = [
     const b = await withFx(await readBody(req));
     return idem(req, 'purchase', () => inv.createPurchase(b));
   }],
-  ['POST', /^\/api\/purchases\/([\w-]+)\/receive$/, (req, m) => idem(req, `receive:${m[1]}`, () => inv.receivePurchase(m[1]))],
+  ['POST', /^\/api\/purchases\/([\w-]+)\/receive$/, async (req, m) => {
+    const b = await readBody(req);
+    return idem(req, `receive:${m[1]}`, () => inv.receivePurchase(m[1], b));
+  }],
   ['POST', /^\/api\/purchases\/([\w-]+)\/cancel$/, async (req, m) => {
     const b = await readBody(req);
     return idem(req, `cancel:${m[1]}`, () => inv.cancelPurchase(m[1], b.note));
@@ -364,6 +384,34 @@ const routes = [
   ['GET', /^\/api\/analytics\/abcxyz$/, (_q, _m, url) => abcXyz(range(url))],
   ['GET', /^\/api\/analytics\/recommendations$/, () => recommendationQuality()],
 
+  ['POST', /^\/api\/verify\/([\w-]+)$/, async (req, m) => {
+    const b = await readBody(req);
+    return verifyOpportunity(m[1], b, (watchId) => runScanNow(watchId));
+  }],
+  ['POST', /^\/api\/attempts$/, async (req) => recordAttempt(await readBody(req))],
+  ['GET', /^\/api\/quality\/sources$/, () => {
+    // автоматические источники + ручные, по которым были попытки закупки
+    const ids = new Set(['funpay', ...SOURCES.filter((s) => s.adapter).map((s) => s.id), ...all('SELECT DISTINCT source_id FROM execution_attempts').map((r) => r.source_id)]);
+    return Object.fromEntries([...ids].map((id) => [id, sourceQuality(id)]));
+  }],
+  ['GET', /^\/api\/demand$/, (_q, _m, url) => {
+    const item = url.searchParams.get('item') || undefined;
+    const category = url.searchParams.get('category') || undefined;
+    return { sell: sellProbability({ item, category }, { minEvents: getSettings().demand.minOwnSales }), bands: priceBands({ item }), weekdays: weekdayProfile(item) };
+  }],
+  ['GET', /^\/api\/risk$/, (_q, _m, url) => {
+    const mode = modeQ(url);
+    return { capital: capitalSnapshot(mode), aging: aging(mode), cashFlow: cashFlowForecast(mode), reservations: listCashReservations(mode), limits: getSettings().risk };
+  }],
+  ['POST', /^\/api\/cash\/reserve$/, async (req) => {
+    const b = await readBody(req);
+    return idem(req, 'cash-reserve', () => reserveCash(b));
+  }],
+  ['POST', /^\/api\/cash\/reserve\/([\w-]+)\/release$/, (req, m) => idem(req, `cash-release:${m[1]}`, () => releaseCash(m[1]))],
+  ['GET', /^\/api\/paper$/, () => paperStats()],
+  ['GET', /^\/api\/backtest$/, () => backtestRuns()],
+  ['POST', /^\/api\/backtest$/, async (req) => runBacktest(await readBody(req))],
+  ['GET', /^\/api\/metrics\/product$/, (_q, _m, url) => productMetrics(range(url))],
   ['GET', /^\/api\/audit$/, (_q, _m, url) => auditLog({ entity: url.searchParams.get('entity') || undefined })],
   ['GET', /^\/api\/backups$/, () => listBackups()],
   ['POST', /^\/api\/backups$/, () => createBackup('manual')],
@@ -398,18 +446,41 @@ function serveStatic(res, pathname) {
   createReadStream(file).pipe(res);
 }
 
-const HOST_OK = new RegExp(`^(127\\.0\\.0\\.1|localhost)(:(${UI_PORTS.join('|')}))?$`);
-const ORIGIN_OK = new RegExp(`^http://(127\\.0\\.0\\.1|localhost)(:(${UI_PORTS.join('|')}))?$`);
+const LOCAL_HOST = new RegExp(`^(127\\.0\\.0\\.1|localhost)(:(${UI_PORTS.join('|')}))?$`);
+const LOCAL_ORIGIN = new RegExp(`^http://(127\\.0\\.0\\.1|localhost)(:(${UI_PORTS.join('|')}))?$`);
+const hostOk = (h) => LOCAL_HOST.test(h) || PUBLIC_HOSTS.includes(String(h).toLowerCase().replace(/:443$/, ''));
+const originOk = (o) => LOCAL_ORIGIN.test(o) || PUBLIC_HOSTS.some((h) => o === `https://${h}` || o === `http://${h}`);
+
+/** дорогие операции: не больше N за минуту, чтобы случайные повторы не нагружали источники и FunPay */
+const RATE = [
+  [/^\/api\/scan(-all)?(\/|$)/, 20],
+  [/^\/api\/discover$/, 3],
+  [/^\/api\/verify\//, 20],
+  [/^\/api\/backtest$/, 5],
+  [/^\/api\/backups/, 10],
+];
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}`);
-  // DNS rebinding: чужое имя хоста, указывающее на 127.0.0.1, не пройдёт
-  if (!HOST_OK.test(req.headers.host ?? '')) return json(res, 421, { error: 'недопустимый Host' });
+  // DNS rebinding: чужое имя хоста, указывающее на сервер, не пройдёт
+  if (!hostOk(req.headers.host ?? '')) return json(res, 421, { error: 'недопустимый Host' });
   if (!url.pathname.startsWith('/api/')) return serveStatic(res, url.pathname);
   const origin = req.headers.origin;
-  if (origin && !ORIGIN_OK.test(origin)) return json(res, 403, { error: 'чужой origin' });
+  if (origin && !originOk(origin)) return json(res, 403, { error: 'чужой origin' });
   // CSRF: изменяющие запросы обязаны нести заголовок клиента — браузер не пошлёт его с чужого сайта без preflight
   if (req.method !== 'GET' && req.headers['x-fpo-client'] !== '1') return json(res, 403, { error: 'нет заголовка X-FPO-Client' });
+  // вход (только в серверном режиме с FPO_AUTH_TOKEN)
+  if (url.pathname === '/api/login' && req.method === 'POST') {
+    const r = login(req, (await readBody(req).catch(() => ({}))).token);
+    return r.ok ? json(res, 200, { ok: true }, { 'Set-Cookie': r.cookie }) : json(res, r.status, { error: r.error });
+  }
+  if (url.pathname === '/api/logout' && req.method === 'POST') return json(res, 200, { ok: true }, { 'Set-Cookie': logout(req) });
+  if (!checkAuth(req)) return json(res, 401, { error: 'нужен вход', code: 'auth' });
+  if (req.method !== 'GET') {
+    const rule = RATE.find(([re]) => re.test(url.pathname));
+    const wait = rule && rateLimit(rule[0].source, rule[1], 60_000);
+    if (wait) return json(res, 429, { error: `слишком часто — повторите через ${wait} с` }, { 'Retry-After': String(wait) });
+  }
   const exp = req.method === 'GET' && url.pathname.match(/^\/api\/export\/(sales|purchases|ledger)$/);
   if (exp) {
     res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="funpay-ops-${exp[1]}-${nowIso().slice(0, 10)}.csv"` });
@@ -426,6 +497,15 @@ const server = createServer(async (req, res) => {
     json(res, status, { error: e.message, code: e.code });
   }
 });
+
+if (!['127.0.0.1', 'localhost', '::1'].includes(HOST) && !authEnabled()) {
+  console.error('Отказ запуска: сервер открыт в сеть (FPO_HOST), но не задан FPO_AUTH_TOKEN. См. docs/DEPLOY.md');
+  process.exit(1);
+}
+if (authEnabled() && String(process.env.FPO_AUTH_TOKEN).length < 24) {
+  console.error('Отказ запуска: FPO_AUTH_TOKEN короче 24 символов.');
+  process.exit(1);
+}
 
 server.listen(PORT, HOST, () => {
   log(`FunPay Ops 2: http://${HOST}:${PORT} (схема v${schemaVersion()})`);
@@ -447,11 +527,13 @@ function botCommands() {
     },
     '/opportunities': () => {
       const items = buildOpportunities()
-        .filter((o) => o.eval.status === STATUS.RECOMMENDED)
-        .sort((a, b) => b.eval.forecast.net - a.eval.forecast.net)
+        .filter((o) => [STATUS.RECOMMENDED, STATUS.CANDIDATE].includes(o.eval.status))
+        .sort((a, b) => (b.eval.netPerDay ?? 0) - (a.eval.netPerDay ?? 0))
         .slice(0, 5);
       if (!items.length) return 'Проверенных возможностей сейчас нет.';
-      return items.map((o) => `• <b>${escape(o.name)}</b>: ${escape(o.buy.sourceId)} ${rub(o.buy.priceRub)} → ${rub(o.eval.forecast.price)}, чистыми ${rub(o.eval.forecast.net)} (балл ${o.eval.score.toFixed(0)})`).join('\n');
+      return items
+        .map((o) => `${o.eval.status === STATUS.RECOMMENDED ? '🟢' : '🟡'} <b>${escape(o.name)}</b>: ${escape(o.buy.sourceId)} ${rub(o.buy.priceRub)} → ${rub(o.eval.forecast.price)}, чистыми ${rub(o.eval.forecast.net)} (≈${rub(o.eval.netPerDay)}/день, балл ${o.eval.score.toFixed(0)})`)
+        .join('\n') + '\n🟡 — кандидат: перепроверьте цену и наличие перед покупкой';
     },
     '/profit': (text) => {
       const days = Math.min(365, Math.max(1, Number(text.split(/\s+/)[1]) || 7));

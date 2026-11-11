@@ -5,9 +5,9 @@ import { all, nowIso, one, run } from '../db/db.mjs';
 const CB_FAILS = 3; // подряд неудачных вызовов → размыкание
 const CB_COOLDOWN_MS = 15 * 60_000;
 
-export function recordHealth(sourceId, { ok, errorClass = null, httpStatus = null, latencyMs = null, items = null, detail = null }) {
+export function recordHealth(sourceId, { ok, errorClass = null, httpStatus = null, latencyMs = null, items = null, detail = null, dqChecked = null, dqIssues = null, dqDetail = null }) {
   run(
-    'INSERT INTO source_health(source_id, ts, ok, error_class, http_status, latency_ms, items, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO source_health(source_id, ts, ok, error_class, http_status, latency_ms, items, detail, dq_checked, dq_issues, dq_detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     sourceId,
     nowIso(),
     ok ? 1 : 0,
@@ -16,6 +16,9 @@ export function recordHealth(sourceId, { ok, errorClass = null, httpStatus = nul
     latencyMs,
     items,
     detail ? String(detail).slice(0, 800) : null,
+    dqChecked,
+    dqIssues,
+    dqDetail ? String(dqDetail).slice(0, 800) : null,
   );
 }
 

@@ -1,3 +1,5 @@
+import * as F from '../../shared/finance.mjs';
+import type { ForecastArgs, LossSpec } from '../../shared/finance.mjs';
 /**
  * Формула чистой маржи продавца FunPay:
  *   Маржа = P × (1 − X%) × (1 − Y%) − C − R − T
@@ -80,85 +82,70 @@ const share = (pct: unknown) => Math.min(pos(pct), 100) / 100;
 /** Округление до копеек, без артефактов вида 0.1 + 0.2 */
 export const kop = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;
 
-/** Множитель «доля цены, которая доходит до продавца»: (1 − X)(1 − Y) */
+/** Множитель «доля цены, которая доходит до продавца»: (1 − X)(1 − Y) — из единого движка */
 export function payoutFactor(platformFeePct: number, withdrawFeePct: number): number {
-  return (1 - share(platformFeePct)) * (1 - share(withdrawFeePct));
+  return F.payoutFactor(platformFeePct, withdrawFeePct);
 }
 
 export function timeCost(minutes: number, hourlyRate: number): number {
   return (pos(minutes) / 60) * pos(hourlyRate);
 }
 
-/** net(P) = a × P − b */
-export function linearForm(i: MarginInput): { a: number; b: number } {
-  const k = payoutFactor(i.platformFeePct, i.withdrawFeePct);
-  const T = timeCost(i.minutesPerOrder, i.hourlyRate);
-  let a = k;
-  let b = pos(i.cost) + T;
-  switch (i.disputeMode) {
-    case 'rub':
-      b += pos(i.disputeValue);
-      break;
-    case 'percent':
-      a -= share(i.disputeValue);
-      break;
-    case 'rate':
-      a -= k * share(i.disputeValue) * share(i.disputeRefundPct ?? 100);
-      break;
-  }
-  return { a, b };
+const lossSpec = (i: MarginInput): LossSpec =>
+  i.disputeMode === 'rub'
+    ? { mode: 'rub', value: i.disputeValue }
+    : i.disputeMode === 'rate'
+      ? { mode: 'rate', value: i.disputeValue, refundPct: i.disputeRefundPct ?? 100 }
+      : { mode: 'pct', value: i.disputeValue };
+
+/** Аргументы единого движка из полей калькулятора (без налога, курса и капитала — их калькулятор не задаёт) */
+export function toForecastArgs(i: MarginInput): ForecastArgs {
+  return {
+    buyRub: pos(i.cost),
+    saleFee: { pct: i.platformFeePct },
+    sourceFee: { pct: 0 },
+    m: {
+      feeModel: 'deduct',
+      withdrawPct: i.withdrawFeePct,
+      minutesPerOrder: i.minutesPerOrder,
+      hourlyRate: i.hourlyRate,
+      losses: lossSpec(i),
+    },
+  };
 }
 
 export function disputeLossOf(i: MarginInput, price: number): number {
   const P = pos(price);
-  switch (i.disputeMode) {
-    case 'rub':
-      return pos(i.disputeValue);
-    case 'percent':
-      return P * share(i.disputeValue);
-    case 'rate':
-      return P * payoutFactor(i.platformFeePct, i.withdrawFeePct) * share(i.disputeValue) * share(i.disputeRefundPct ?? 100);
-  }
+  return F.lossesOf(lossSpec(i), P, P * payoutFactor(i.platformFeePct, i.withdrawFeePct));
 }
 
 export function calcMargin(i: MarginInput): MarginResult {
   const P = pos(i.price);
+  const f = F.forecast({ ...toForecastArgs(i), sellPrice: P });
   const X = share(i.platformFeePct);
   const Y = share(i.withdrawFeePct);
-  const C = pos(i.cost);
-  const R = disputeLossOf(i, P);
-  const T = timeCost(i.minutesPerOrder, i.hourlyRate);
-
-  const platformFee = P * X;
-  const afterPlatform = P - platformFee;
-  const withdrawFee = afterPlatform * Y;
-  const payout = afterPlatform - withdrawFee; // = P × (1 − X) × (1 − Y)
-  const net = payout - C - R - T;
-
-  // При ошибочном сложении R в режиме rate тоже пересчитался бы от неверной выплаты
+  // справочно: что получилось бы при ОШИБОЧНОМ сложении X + Y (единый движок такой ошибки не допускает)
   const wrongPayout = P * Math.max(0, 1 - X - Y);
-  const wrongR = i.disputeMode === 'rate' ? wrongPayout * share(i.disputeValue) * share(i.disputeRefundPct ?? 100) : R;
-  const netIfAdded = wrongPayout - C - wrongR - T;
-
+  const wrongR = i.disputeMode === 'rate' ? wrongPayout * share(i.disputeValue) * share(i.disputeRefundPct ?? 100) : f.losses;
+  const netIfAdded = wrongPayout - f.purchase - wrongR - f.fulfillment;
   const investment = pos(i.investment);
   const goal = pos(i.monthlyGoal);
-
   return {
     price: P,
-    platformFee,
-    afterPlatform,
-    withdrawFee,
-    payout,
-    cost: C,
-    disputeLoss: R,
-    timeCost: T,
-    net,
-    netPct: P > 0 ? (net / P) * 100 : 0,
-    roiPct: C > 0 ? (net / C) * 100 : null,
-    breakEvenOrders: investment > 0 && net > 0 ? Math.ceil(investment / net - 1e-9) : null,
-    ordersForMonthlyGoal: goal > 0 && net > 0 ? Math.ceil(goal / net - 1e-9) : null,
+    platformFee: f.platformFee,
+    afterPlatform: P - f.platformFee,
+    withdrawFee: f.withdrawFee,
+    payout: f.payout,
+    cost: f.purchase,
+    disputeLoss: f.losses,
+    timeCost: f.fulfillment,
+    net: f.net,
+    netPct: f.netPct,
+    roiPct: f.roiPct,
+    breakEvenOrders: investment > 0 && f.net > 0 ? Math.ceil(investment / f.net - 1e-9) : null,
+    ordersForMonthlyGoal: goal > 0 && f.net > 0 ? Math.ceil(goal / f.net - 1e-9) : null,
     netIfAdded,
-    additionError: net - netIfAdded,
+    additionError: f.net - netIfAdded,
   };
 }
 
@@ -178,17 +165,15 @@ export interface PriceTargets {
   maxPossiblePct: number;
 }
 
-const ceilKop = (v: number) => Math.ceil(v * 100 - 1e-6) / 100;
-
 export function priceTargets(i: MarginInput): PriceTargets {
-  const { a, b } = linearForm(i);
-  const m = share(i.targetMarginPct);
+  const args = toForecastArgs(i);
   const tRub = pos(i.targetMarginRub);
+  const maxPossiblePct = F.maxMarginPct(args);
   return {
-    breakEvenPrice: a > 0 ? ceilKop(b / a) : null,
-    priceForRub: a > 0 && tRub > 0 ? ceilKop((b + tRub) / a) : null,
-    priceForPct: i.targetMarginPct > 0 && a - m > 0 ? ceilKop(b / (a - m)) : null,
-    maxPossiblePct: Math.max(0, a * 100),
+    breakEvenPrice: maxPossiblePct > 0 ? F.solvePrice(args, 0) : null,
+    priceForRub: tRub > 0 && maxPossiblePct > 0 ? F.solvePrice(args, tRub) : null,
+    priceForPct: i.targetMarginPct > 0 && maxPossiblePct > pos(i.targetMarginPct) ? F.solvePrice(args, 0, i.targetMarginPct) : null,
+    maxPossiblePct,
   };
 }
 
@@ -199,15 +184,9 @@ export function verdictOf(netPct: number, net: number, warnThresholdPct: number)
   return 'good';
 }
 
-/**
- * Эффективная комиссия вывода: процент + фиксированная плата, размазанная по сумме вывода.
- *   Y_eff = 1 − (S × (1 − p) − F) / S
- */
+/** Эффективная комиссия вывода: Y_eff = 1 − (S × (1 − p) − F) / S — из единого движка */
 export function effectiveWithdrawPct(amount: number, pct: number, fixed: number): number | null {
-  const S = pos(amount);
-  if (S <= 0) return null;
-  const received = S * (1 - share(pct)) - pos(fixed);
-  return Math.min(100, Math.max(0, (1 - received / S) * 100));
+  return F.effectiveWithdrawPct(amount, pct, fixed);
 }
 
 /* ───────────────────────── Журнал ───────────────────────── */
@@ -237,18 +216,11 @@ export function dealPayout(d: DealLike): number {
   return pos(d.sell) * payoutFactor(d.feePct, d.withdrawPct);
 }
 
-/** Итог сделки по той же формуле (без T, т.к. время в журнал не вносится). */
+/** Итог сделки — тем же движком, что продажи на складе (без T: время в журнал не вносится). */
 export function dealResult(d: DealLike): number {
   const payout = dealPayout(d);
-  const buy = pos(d.buy);
-  switch (d.outcome) {
-    case 'refund':
-      return -buy;
-    case 'partial':
-      return payout - buy - pos(d.disputeLoss);
-    default:
-      return payout - buy;
-  }
+  const refund = d.outcome === 'refund' ? payout : d.outcome === 'partial' ? pos(d.disputeLoss) : 0;
+  return F.saleResult({ unitPrice: pos(d.sell), saleFeePct: d.feePct, withdrawPct: d.withdrawPct, cogs: pos(d.buy), refund }).net;
 }
 
 /** Потеря из-за спора относительно сделки без спора, ₽ (≥ 0) */

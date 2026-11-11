@@ -1,6 +1,7 @@
 // Транзакции, склад, аналитика, комиссии, здоровье, история, бэкап — на базе в памяти.
 import { beforeEach, describe, expect, it } from 'vitest';
 import { closeDb, getDb, openDb, schemaVersion, one } from '../db/db.mjs';
+import { MIGRATIONS } from '../db/migrations.mjs';
 import { idempotent, auditLog } from '../repo/audit.mjs';
 import * as inv from '../repo/inventory.mjs';
 import { abcXyz, metrics, recommendationQuality } from '../repo/analytics.mjs';
@@ -22,7 +23,7 @@ beforeEach(fresh);
 
 describe('схема и настройки', () => {
   it('миграции применены, повторное открытие не ломает схему', () => {
-    expect(schemaVersion()).toBe(1);
+    expect(schemaVersion()).toBe(MIGRATIONS.length);
     expect(one("SELECT count(*) n FROM sqlite_master WHERE type = 'table' AND name = 'purchases'").n).toBe(1);
   });
 

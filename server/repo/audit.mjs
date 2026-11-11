@@ -1,5 +1,5 @@
 // Журнал действий и защита от повторного выполнения (идемпотентность).
-import { all, nowIso, one, run } from '../db/db.mjs';
+import { all, nowIso, one, run, tx } from '../db/db.mjs';
 
 const SECRET_KEYS = /token|secret|password|golden/i;
 
@@ -34,12 +34,15 @@ export function auditLog({ limit = 200, entity } = {}) {
 export function idempotent(key, route, fn) {
   if (!key) throw Object.assign(new Error('нужен заголовок Idempotency-Key для финансовой операции'), { status: 400 });
   if (!/^[\w-]{8,100}$/.test(key)) throw Object.assign(new Error('некорректный Idempotency-Key'), { status: 400 });
-  const prev = one('SELECT route, response FROM idempotency WHERE key = ?', key);
-  if (prev) {
-    if (prev.route !== route) throw Object.assign(new Error('Idempotency-Key уже использован для другой операции'), { status: 409 });
-    return { ...JSON.parse(prev.response), replayed: true };
-  }
-  const result = fn();
-  run('INSERT INTO idempotency(key, route, response, created_at) VALUES (?, ?, ?, ?)', key, route, JSON.stringify(result), nowIso());
-  return result;
+  // проверка, операция и запись ключа — одна транзакция: сбой посередине не оставит операцию без ключа
+  return tx(() => {
+    const prev = one('SELECT route, response FROM idempotency WHERE key = ?', key);
+    if (prev) {
+      if (prev.route !== route) throw Object.assign(new Error('Idempotency-Key уже использован для другой операции'), { status: 409 });
+      return { ...JSON.parse(prev.response), replayed: true };
+    }
+    const result = fn();
+    run('INSERT INTO idempotency(key, route, response, created_at) VALUES (?, ?, ?, ?)', key, route, JSON.stringify(result), nowIso());
+    return result;
+  });
 }

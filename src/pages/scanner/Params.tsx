@@ -101,6 +101,33 @@ export function Params({ sc }: { sc: ScannerState }) {
           </Card>
         </div>
       </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card title="Исполнимость и строгость (Profit Verification)">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <NumberField label="Перепроверка действует" suffix="мин" value={s.verification.executableTtlMin} onChange={(v) => set('verification', { executableTtlMin: v })} hint="После — снова «кандидат»" />
+            <NumberField label="Допустимый рост цены" suffix="%" value={s.verification.priceTolerancePct} onChange={(v) => set('verification', { priceTolerancePct: v })} hint="При перепроверке" />
+            <label className="block sm:col-span-2">
+              <span className="label">Скины</span>
+              <select className="input" value={s.matching.skinsStrict} onChange={(e) => set('matching', { skinsStrict: e.target.value as 'all' | 'pattern' })}>
+                <option value="all">строго: каждый скин подтверждается вручную (float, паттерн и наклейки источник не передаёт)</option>
+                <option value="pattern">только скины, где цена зависит от фазы/паттерна (Doppler, Case Hardened, Fade…)</option>
+              </select>
+            </label>
+          </div>
+        </Card>
+        <Card title="Спрос и paper trading">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <NumberField label="Минимум снимков рынка" value={s.demand.minSnapshots} onChange={(v) => set('demand', { minSnapshots: Math.floor(v) })} hint="Меньше — ликвидность не оценивается" />
+            <NumberField label="Минимум наблюдения" suffix="ч" value={s.demand.minObservationHours} onChange={(v) => set('demand', { minObservationHours: v })} />
+            <NumberField label="Своих продаж для статистики" value={s.demand.minOwnSales} onChange={(v) => set('demand', { minOwnSales: Math.floor(v) })} hint="Для вероятности продажи" />
+            <NumberField label="Горизонт paper trading" suffix="дн." value={s.paper.horizonDays} onChange={(v) => set('paper', { horizonDays: Math.max(1, v) })} />
+          </div>
+          <label className="mt-3 flex items-center gap-2 text-sm text-muted">
+            <input type="checkbox" checked={s.paper.enabled} onChange={(e) => set('paper', { enabled: e.target.checked })} />
+            Открывать бумажные позиции по кандидатам
+          </label>
+        </Card>
+      </div>
       {error && <Warning tone="bad">{error}</Warning>}
       <div className="flex items-center justify-end gap-3">
         {saved && <span className="text-xs text-good">Сохранено {fmtDateTime(saved)}</span>}

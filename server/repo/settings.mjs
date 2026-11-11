@@ -1,4 +1,5 @@
 // Настройки сервера с историей изменений (воспроизводимость расчётов).
+import { createHash } from 'node:crypto';
 import { all, nowIso, one, run, tx } from '../db/db.mjs';
 import { audit } from './audit.mjs';
 
@@ -35,6 +36,16 @@ export const DEFAULT_SETTINGS = {
   },
   inventory: { costMethod: 'fifo', allowNegative: false, startingCapital: 0, maxPurchaseRub: 0, lowStockQty: 1 },
   analytics: { abcA: 80, abcB: 95, xyzX: 0.1, xyzY: 0.25 },
+  /** Capital & Risk: доли капитала, старение запасов, обучение потерь */
+  risk: { maxItemSharePct: 30, maxSourceSharePct: 50, maxCategorySharePct: 70, staleStockDays: 30, lossPriorWeight: 10 },
+  /** Profit Verification: сколько минут перепроверка считается действующей и допустимый рост цены */
+  verification: { executableTtlMin: 15, priceTolerancePct: 2 },
+  /** Строгость сопоставления: skinsStrict all — любой скин подтверждается вручную (float/паттерн/наклейки источник не передаёт) */
+  matching: { skinsStrict: 'all' },
+  /** Минимум данных для выводов о спросе */
+  demand: { minSnapshots: 6, minObservationHours: 24, minOwnSales: 5 },
+  /** Paper trading: «бумажные» позиции по рекомендациям, закрытие по рыночной переоценке */
+  paper: { enabled: true, horizonDays: 7 },
   notify: { enabled: false, chatIds: [], minNet: 100, competitorDropPct: 10, sourceDownMin: 30 },
   backup: { enabled: true, everyH: 24, keep: 14 },
 };
@@ -69,6 +80,7 @@ const ENUMS = {
   'costModel.feeModel': ['deduct', 'addon'],
   'costModel.taxBase': ['payout', 'profit'],
   'inventory.costMethod': ['fifo', 'avg'],
+  'matching.skinsStrict': ['all', 'pattern'],
 };
 
 function validate(s) {
@@ -111,4 +123,13 @@ export function updateSettings(patch) {
 
 export function settingsHistory(limit = 200) {
   return all('SELECT key, value, changed_at FROM settings_history ORDER BY id DESC LIMIT ?', limit).map((r) => ({ ...r, value: JSON.parse(r.value) }));
+}
+
+/**
+ * Отпечаток параметров, влияющих на решение (версионирование стратегии):
+ * одинаковый хэш — рекомендации и бэктесты сравнимы между собой.
+ */
+export function settingsHash(s = getSettings()) {
+  const relevant = { costModel: s.costModel, pricing: s.pricing, freshness: s.freshness, scoring: s.scoring, risk: s.risk, verification: s.verification, matching: s.matching, demand: s.demand };
+  return createHash('sha1').update(JSON.stringify(relevant)).digest('hex').slice(0, 12);
 }

@@ -32,7 +32,8 @@ export class SourceError extends Error {
 }
 
 async function waitForHost(host) {
-  const gap = HOST_GAP[host] ?? HOST_GAP.default;
+  // FPO_HTTP_NO_GAP — только для тестов на фикстурах (сеть не используется)
+  const gap = process.env.FPO_HTTP_NO_GAP ? 0 : (HOST_GAP[host] ?? HOST_GAP.default);
   const now = Date.now();
   const at = Math.max(now, hostNext.get(host) ?? 0);
   hostNext.set(host, at + gap);
@@ -84,8 +85,8 @@ async function fetchOnce(url, { as, headers, timeout }) {
 export async function fetchCached(url, opt = {}) {
   const { ttl = 10 * 60_000, as = 'json', headers = {}, timeout = 25_000, retries = MAX_RETRIES } = opt;
   const hit = cache.get(url);
-  if (hit && Date.now() - hit.at < hit.ttl) return hit.value;
-  if (inflight.has(url)) return inflight.get(url);
+  if (!freshDepth && hit && Date.now() - hit.at < hit.ttl) return hit.value;
+  if (!freshDepth && inflight.has(url)) return inflight.get(url);
 
   const p = (async () => {
     let lastErr;
@@ -110,6 +111,17 @@ export async function fetchCached(url, opt = {}) {
     return await p;
   } finally {
     inflight.delete(url);
+  }
+}
+
+let freshDepth = 0;
+/** Выполнить fn с запросами мимо кэша — для перепроверки связки перед закупкой */
+export async function withFresh(fn) {
+  freshDepth++;
+  try {
+    return await fn();
+  } finally {
+    freshDepth--;
   }
 }
 

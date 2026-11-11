@@ -76,6 +76,21 @@ function isCombo(raw) {
   return false;
 }
 
+/** Ограничения активации ключа: [регэксп, описание, мешает ли активации в РФ/СНГ] */
+const RESTRICTION_RE = [
+  [W('нужен vpn|требуется vpn|vpn обязателен|через vpn|с vpn'), 'нужен VPN', true],
+  [/не (?:активируется|работает|подходит)[^.]{0,20}(?:рф|росси|снг)/u, 'не активируется в РФ/СНГ', true],
+  [/(?:рф|росси|снг)[^.]{0,15}не (?:активируется|работает|поддерживается)/u, 'не активируется в РФ/СНГ', true],
+  [W('region locked|регион лок|региональная блокировка'), 'региональная блокировка', false],
+  [W('смена региона|сменить регион|смены региона'), 'требует смены региона аккаунта', true],
+];
+
+/** float скина из текста лота: «Float: 0.153», «флоат 0,07» */
+export function parseFloatValue(text) {
+  const m = String(text ?? '').match(/(?:float|флоат|флот)\s*[:=-]?\s*(0[.,]\d{2,})/i);
+  return m ? Number(m[1].replace(',', '.')) : null;
+}
+
 /** Предметы, цена которых зависит от фазы/паттерна/float — по одному названию не сопоставить */
 const PATTERN_SENSITIVE = /doppler|case hardened|fade|marble fade|crimson web|slaughter|heat treated|blue gem|ruby|sapphire|emerald|black pearl/i;
 
@@ -89,6 +104,8 @@ export function extractAttrs(text) {
   for (const [k, re] of EDITION_RE) if (has(t, re)) out.editions.push(k);
   out.addon = has(t, ADDON_RE);
   out.combo = isCombo(String(text ?? ''));
+  out.restrictions = RESTRICTION_RE.filter(([re]) => re.test(t)).map(([, text, blocksRu]) => ({ text, blocksRu }));
+  out.float = parseFloatValue(text);
   return out;
 }
 
@@ -158,8 +175,27 @@ export function matchOffer(offerAttrs, req = {}, ctx = {}) {
         else review(`фаза/паттерн не указаны у источника (нужна ${req.phase})`);
       } else review('цена зависит от фазы/паттерна/float — подтвердите предмет вручную');
     }
-    if (req.requireFloat) review('float/paint seed источником не передаются — проверьте вручную');
+    // float: у лотов FunPay он бывает указан в описании; у площадок-источников в выгрузках его нет
+    const fl = ctx.float ?? null;
+    const hasRange = req.floatMin !== undefined && req.floatMin !== null && req.floatMax !== undefined && req.floatMax !== null && req.floatMax > 0;
+    if (hasRange) {
+      if (fl === null) review(`float не указан (нужен ${req.floatMin}–${req.floatMax})`);
+      else if (fl < req.floatMin || fl > req.floatMax) reject(`float ${fl}, нужен ${req.floatMin}–${req.floatMax}`);
+      else pass(`float ${fl}`);
+    } else if (req.requireFloat) review('float/paint seed источником не передаются — проверьте вручную');
+    // строгая идентификация: float, паттерн и наклейки влияют на цену любого скина
+    if (ctx.side !== 'funpay' && ctx.skinsStrict !== 'pattern' && status === 'VERIFIED') {
+      review('float, paint seed, паттерн и наклейки источник не передаёт — подтвердите предмет вручную (строгий режим)');
+    }
     return { status, source: 'rules', reasons };
+  }
+
+  // ── ограничения активации (ключ «не для РФ», «нужен VPN»)
+  const restr = offerAttrs.restrictions ?? [];
+  if (restr.length) {
+    const needsRuCis = (req.regions ?? []).some((r) => ['ru', 'cis', 'by', 'kz'].includes(r));
+    if (needsRuCis && restr.some((x) => x.blocksRu)) reject(`ограничение активации: ${restr.map((x) => x.text).join(', ')}`);
+    else review(`есть ограничения активации: ${restr.map((x) => x.text).join(', ')}`);
   }
 
   // ── тип товара

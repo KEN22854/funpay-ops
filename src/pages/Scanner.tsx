@@ -106,9 +106,17 @@ function BuyDialog({ o, onClose }: { o: Opportunity; onClose: () => void }) {
     setError(null);
     try {
       const p = await api.createPurchase(
-        { item: o.name, watchId: o.watchId, recommendationId: o.id, sourceId: o.buy.sourceId, qty, unitPrice: price, currency: o.buy.currency, fxRate: o.buy.fxRate, feesRub: fees, mode, status, note: o.buy.url },
+        { item: o.name, watchId: o.watchId, recommendationId: o.id, sourceId: o.buy.sourceId, category: o.category, qty, unitPrice: price, currency: o.buy.currency, fxRate: o.buy.fxRate, feesRub: fees, mode, status, note: o.buy.url },
         key,
       );
+      // фактическая цена против котировки — точность источника (только для реальных денег)
+      if (mode === 'real' && !p.replayed) {
+        const actualRub = price * (o.buy.fxRate ?? 1);
+        const changed = Math.abs(actualRub - o.buy.priceRub) / o.buy.priceRub > 0.005;
+        await api
+          .attempt({ oppId: o.id, watchId: o.watchId, sourceId: o.buy.sourceId, offerUrl: o.buy.url, quotedRub: o.buy.priceRub, actualRub, quotedStock: o.buy.stock ?? null, outcome: changed ? 'price_changed' : 'ok', purchaseId: p.id })
+          .catch(() => {});
+      }
       setDone(`Партия записана: ${p.qty} шт по ${fmtRub(p.unit_cost_rub)} (всего ${fmtRub(p.total_cost_rub)})`);
     } catch (e) {
       setError((e as Error).message);

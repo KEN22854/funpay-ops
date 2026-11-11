@@ -86,6 +86,14 @@ export function ServerAdmin() {
             <input type="checkbox" checked={s.inventory.allowNegative} onChange={(e) => setPart('inventory', { allowNegative: e.target.checked })} />
             Разрешить продажу без остатка (минус на складе)
           </label>
+          <h4 className="mb-2 mt-4 text-xs font-medium uppercase tracking-wide text-muted">Лимиты риска (доля капитала)</h4>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <NumberField label="На один товар" suffix="%" value={s.risk.maxItemSharePct} onChange={(v) => setPart('risk', { maxItemSharePct: v })} />
+            <NumberField label="На один источник" suffix="%" value={s.risk.maxSourceSharePct} onChange={(v) => setPart('risk', { maxSourceSharePct: v })} />
+            <NumberField label="На категорию" suffix="%" value={s.risk.maxCategorySharePct} onChange={(v) => setPart('risk', { maxCategorySharePct: v })} />
+            <NumberField label="Залежалый товар через" suffix="дн." value={s.risk.staleStockDays} onChange={(v) => setPart('risk', { staleStockDays: v })} />
+            <NumberField label="Вес априорных потерь" value={s.risk.lossPriorWeight} onChange={(v) => setPart('risk', { lossPriorWeight: v })} hint="Сколько «своих сделок» весит параметр споров" />
+          </div>
           <h4 className="mb-2 mt-4 text-xs font-medium uppercase tracking-wide text-muted">Границы ABC / XYZ</h4>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <NumberField label="A до" suffix="%" value={s.analytics.abcA} onChange={(v) => setPart('analytics', { abcA: v })} />
@@ -94,7 +102,7 @@ export function ServerAdmin() {
             <NumberField label="Y: CV ≤" value={s.analytics.xyzY} onChange={(v) => setPart('analytics', { xyzY: v })} />
           </div>
           <div className="mt-4 flex justify-end">
-            <button className="btn-primary" onClick={() => act(() => api.saveSettings({ inventory: s.inventory, analytics: s.analytics }), 'Сохранено')}>
+            <button className="btn-primary" onClick={() => act(() => api.saveSettings({ inventory: s.inventory, analytics: s.analytics, risk: s.risk }), 'Сохранено')}>
               Сохранить
             </button>
           </div>

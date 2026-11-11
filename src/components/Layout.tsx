@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useStore } from '../store/useStore';
+import { api } from '../lib/api';
 
 const NAV = [
   { to: '/scanner', label: 'Сканер выгоды' },
   { to: '/inventory', label: 'Склад и финансы' },
+  { to: '/quality', label: 'Качество и риск' },
   { to: '/calculator', label: 'Калькулятор' },
   { to: '/journal', label: 'Журнал' },
   { to: '/auto-delivery', label: 'Автовыдача' },
@@ -23,6 +25,13 @@ export function Layout() {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
   useEffect(() => setOpen(false), [pathname]);
+  // серверный режим (VPS): API ответил «нужен вход» — показываем форму ключа доступа
+  const [needLogin, setNeedLogin] = useState(false);
+  useEffect(() => {
+    const h = () => setNeedLogin(true);
+    window.addEventListener('fpo:auth-required', h);
+    return () => window.removeEventListener('fpo:auth-required', h);
+  }, []);
 
   const link = ({ isActive }: { isActive: boolean }) =>
     `block rounded-lg px-3 py-2 text-sm transition ${isActive ? 'bg-accent/15 text-accent font-medium' : 'text-muted hover:bg-raised hover:text-fg'}`;
@@ -50,6 +59,36 @@ export function Layout() {
       <main className="mx-auto w-full min-w-0 max-w-6xl px-4 py-6 sm:px-6 md:py-8">
         <Outlet />
       </main>
+      {needLogin && <LoginDialog />}
+    </div>
+  );
+}
+
+function LoginDialog() {
+  const [token, setToken] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+      <form
+        className="card w-full max-w-sm space-y-3 p-5"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          try {
+            await api.login(token);
+            location.reload();
+          } catch (err) {
+            setError((err as Error).message);
+          }
+        }}
+      >
+        <h2 className="font-semibold">Вход в FunPay Ops</h2>
+        <p className="text-xs text-muted">Сервер открыт в сеть и защищён ключом доступа (FPO_AUTH_TOKEN).</p>
+        <input className="input" type="password" autoFocus value={token} onChange={(e) => setToken(e.target.value)} placeholder="ключ доступа" />
+        {error && <p className="text-sm text-bad">{error}</p>}
+        <button className="btn-primary w-full" disabled={!token}>
+          Войти
+        </button>
+      </form>
     </div>
   );
 }

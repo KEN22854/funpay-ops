@@ -26,7 +26,15 @@ export function parsePrice(s) {
 
 /** Только разделы FunPay: /lots/<id>/ или /chips/<id>/ */
 export function normalizeCategoryUrl(u) {
-  const m = String(u ?? '').match(/funpay\.com\/(?:[a-z]{2}\/)?(lots|chips)\/(\d+)/);
+  // принимается только хост funpay.com без логина/пароля; адрес запроса всегда собирается заново (защита от SSRF)
+  let parsed = null;
+  try {
+    parsed = new URL(String(u ?? ''));
+  } catch {
+    /* не URL */
+  }
+  const hostOk = parsed && ['https:', 'http:'].includes(parsed.protocol) && /^(www\.)?funpay\.com$/i.test(parsed.hostname) && !parsed.username && !parsed.password;
+  const m = hostOk ? parsed.pathname.match(/^\/(?:[a-z]{2}\/)?(lots|chips)\/(\d+)\/?$/) : null;
   if (!m) throw new SourceError('нужна ссылка на раздел FunPay вида https://funpay.com/lots/1234/ или /chips/12/', 'input');
   return { kind: m[1], id: Number(m[2]), url: `${BASE}/${m[1]}/${m[2]}/` };
 }

@@ -19,6 +19,7 @@ export default defineConfig({
       FPO_DATA_DIR: join(tmpdir(), 'funpay-ops-test'),
       FPO_BACKUP_DIR: join(tmpdir(), 'funpay-ops-test', 'backups'),
       FPO_HTTP_RETRIES: '0',
+      FPO_HTTP_NO_GAP: '1',
     },
   },
 });

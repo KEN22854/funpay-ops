@@ -313,7 +313,16 @@ function PurchasesTab({ purchases, items, mode, run }: { purchases: Purchase[]; 
                   </td>
                   <td className="whitespace-nowrap text-right text-xs">
                     {p.status === 'in_transit' && (
-                      <button className="text-accent hover:underline" onClick={() => run(() => api.receive(p.id))}>
+                      <button
+                        className="text-accent hover:underline"
+                        onClick={() => {
+                          const v = prompt(`Сколько получено из ${p.qty}? (меньше — частичная поставка, разница за товар вернётся в кассу)`, String(p.qty));
+                          if (v === null) return;
+                          const n = Math.floor(Number(v));
+                          if (!(n >= 1 && n <= p.qty)) return alert('Введите число от 1 до ' + p.qty);
+                          run(() => api.receive(p.id, n));
+                        }}
+                      >
                         получено
                       </button>
                     )}

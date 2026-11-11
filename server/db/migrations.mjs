@@ -189,4 +189,94 @@ CREATE TABLE notifications (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, type TEXT 
 CREATE TABLE backups (id INTEGER PRIMARY KEY, file TEXT NOT NULL, created_at TEXT NOT NULL, size INTEGER, verified_at TEXT, verify_ok INTEGER, verify_detail TEXT);
 `,
   },
+  {
+    version: 2,
+    name: 'verification-quality-backtest',
+    sql: `
+-- версия движка и настроек у рекомендации: воспроизводимость и сравнение версий
+ALTER TABLE recommendations ADD COLUMN engine_version TEXT;
+ALTER TABLE recommendations ADD COLUMN settings_hash TEXT;
+ALTER TABLE recommendations ADD COLUMN category TEXT;
+ALTER TABLE recommendations ADD COLUMN forecast_days REAL;
+
+-- качество данных при каждом вызове адаптера (отдельно от транспортного здоровья)
+ALTER TABLE source_health ADD COLUMN dq_checked INTEGER;
+ALTER TABLE source_health ADD COLUMN dq_issues INTEGER;
+ALTER TABLE source_health ADD COLUMN dq_detail TEXT;
+
+-- перепроверка связки перед закупкой (Profit Verification: theoretical → executable)
+CREATE TABLE verifications (
+  id INTEGER PRIMARY KEY,
+  opp_id TEXT NOT NULL,
+  watch_id TEXT,
+  source_id TEXT NOT NULL,
+  offer_url TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  quoted_rub REAL,
+  fresh_rub REAL,
+  stock INTEGER,
+  user_confirmed_stock INTEGER NOT NULL DEFAULT 0,
+  ok INTEGER NOT NULL,
+  detail TEXT
+);
+CREATE INDEX verif_opp ON verifications(opp_id, ts);
+
+-- попытки закупки: точность котировки и остатка источника (source price/stock accuracy)
+CREATE TABLE execution_attempts (
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL,
+  opp_id TEXT,
+  watch_id TEXT,
+  source_id TEXT NOT NULL,
+  offer_url TEXT,
+  quoted_rub REAL,
+  actual_rub REAL,
+  quoted_stock INTEGER,
+  outcome TEXT NOT NULL CHECK (outcome IN ('ok','price_changed','out_of_stock','not_found','failed')),
+  purchase_id TEXT,
+  note TEXT
+);
+CREATE INDEX exec_src ON execution_attempts(source_id, ts);
+
+-- частичное исполнение закупки
+ALTER TABLE purchases ADD COLUMN received_qty INTEGER;
+ALTER TABLE purchases ADD COLUMN category TEXT;
+
+-- резерв денег под плановые закупки (reserved cash)
+CREATE TABLE cash_reservations (id TEXT PRIMARY KEY, mode TEXT NOT NULL, amount_rub REAL NOT NULL CHECK (amount_rub > 0), item TEXT, source_id TEXT, opp_id TEXT, note TEXT, created_at TEXT NOT NULL, released_at TEXT);
+
+-- paper trading: позиции «как если бы купили» по рекомендациям, закрываются по рыночной переоценке
+CREATE TABLE paper_positions (
+  id TEXT PRIMARY KEY,
+  opp_id TEXT NOT NULL,
+  watch_id TEXT,
+  item TEXT NOT NULL,
+  category TEXT,
+  source_id TEXT NOT NULL,
+  strategy TEXT NOT NULL,
+  opened_at TEXT NOT NULL,
+  horizon_days REAL NOT NULL,
+  entry_cost REAL NOT NULL,
+  planned_price REAL NOT NULL,
+  forecast_net REAL NOT NULL,
+  engine_version TEXT,
+  settings_hash TEXT,
+  closed_at TEXT,
+  exit_price REAL,
+  exit_net REAL,
+  status TEXT NOT NULL CHECK (status IN ('open','closed','expired_no_data'))
+);
+CREATE UNIQUE INDEX paper_open ON paper_positions(opp_id, strategy) WHERE status = 'open';
+
+CREATE TABLE backtest_runs (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, engine_version TEXT, settings_hash TEXT, params TEXT NOT NULL, result TEXT NOT NULL);
+`,
+  },
+  {
+    version: 3,
+    name: 'paper-params',
+    sql: `
+-- параметры расчёта на момент открытия бумажной позиции (выход считается по тем же условиям)
+ALTER TABLE paper_positions ADD COLUMN params TEXT;
+`,
+  },
 ];

@@ -1,59 +1,114 @@
-// Сборка торговых возможностей: результаты сканов × движок оценки × история × склад.
+// Сборка торговых возможностей: результаты сканов × движок оценки × история × склад × риск × спрос.
 import { createHash } from 'node:crypto';
 import { checkCompliance } from './core/compliance.mjs';
+import { matchOffer } from './core/attributes.mjs';
 import { evaluate, LEGACY_MATCH, STATUS } from './core/engine.mjs';
+import { ENGINE_VERSION } from './core/finance.mjs';
 import { all, nowIso, one, run } from './db/db.mjs';
 import { saleFeeFor, sourceFeeFor } from './repo/fees.mjs';
 import { healthSummary } from './repo/health.mjs';
 import { anomalies, changes, liquidity, series } from './repo/history.mjs';
-import { cashBalance, cashTracking, ownSalesStats } from './repo/inventory.mjs';
-import { getSettings } from './repo/settings.mjs';
+import { ownSalesStats } from './repo/inventory.mjs';
+import { capitalSnapshot, checkLimits, learnedLossPct } from './repo/risk.mjs';
+import { priceBands, sellProbability } from './repo/demand.mjs';
+import { sourceQuality } from './repo/quality.mjs';
+import { openPaper } from './repo/paper.mjs';
+import { getSettings, settingsHash } from './repo/settings.mjs';
 import { discoveries, results, watches } from './repo/watches.mjs';
 
-const recId = (watchId, sourceId, url) => createHash('sha1').update(`${watchId ?? 'd'}|${sourceId}|${url}`).digest('hex').slice(0, 20);
+export const oppId = (watchId, sourceId, url) => createHash('sha1').update(`${watchId ?? 'd'}|${sourceId}|${url}`).digest('hex').slice(0, 20);
 
 function offersOf(r) {
   return [...r.sources.flatMap((s) => (s.status === 'error' ? [] : s.offers)), ...r.manual];
 }
 
-/**
- * @param {{ includeBlocked?: boolean, log?: boolean }} opt
- * log — записать RECOMMENDED в журнал рекомендаций (вызывается после скана, а не при каждом просмотре)
- */
-export function buildOpportunities({ log = false } = {}) {
-  const S = getSettings();
-  const cash = { tracking: cashTracking('real'), balance: cashBalance('real') };
-  const healthCache = new Map();
-  const health = (id) => {
-    if (!healthCache.has(id)) healthCache.set(id, healthSummary(id));
-    return healthCache.get(id);
+const memo = (fn) => {
+  const m = new Map();
+  return (k) => {
+    if (!m.has(k)) m.set(k, fn(k));
+    return m.get(k);
   };
+};
+
+/**
+ * @param {{ log?: boolean, only?: string }} opt
+ * log  — записать кандидатов/рекомендации в журнал и открыть бумажные позиции (после скана, не при просмотре)
+ * only — пересчитать одну связку (для перепроверки)
+ */
+export function buildOpportunities({ log = false, only = null } = {}) {
+  const S = getSettings();
+  const hash = settingsHash(S);
+  const snap = capitalSnapshot('real');
+  const health = memo((id) => ({ ...healthSummary(id), ...sourceQuality(id) }));
+  const demandItem = memo((item) => sellProbability({ item }, { minEvents: S.demand.minOwnSales }));
+  const demandCat = memo((cat) => sellProbability({ category: cat }, { minEvents: S.demand.minOwnSales }));
+  const bandsItem = memo((item) => priceBands({ item }));
+  const lossSrc = memo((src) => learnedLossPct({ sourceId: src }));
+  const lossCat = memo((cat) => learnedLossPct({ category: cat }));
+  // последняя перепроверка по каждой связке — одним запросом
+  const verif = new Map(all('SELECT v.* FROM verifications v JOIN (SELECT opp_id, max(id) id FROM verifications GROUP BY opp_id) x ON x.id = v.id').map((v) => [v.opp_id, v]));
+  // связки, подтверждённые своей сделкой: куплено по рекомендации и есть продажа
+  const verifiedByTx = new Set(
+    all("SELECT DISTINCT p.recommendation_id id FROM purchases p JOIN stock_movements m ON m.purchase_id = p.id WHERE m.type = 'sale' AND p.mode = 'real' AND p.recommendation_id IS NOT NULL").map((r) => r.id),
+  );
   const out = [];
 
+  const decide = ({ id, item, buy, market, saleFee, liq, own }) => {
+    const bySrc = lossSrc(buy.sourceId);
+    const learned = bySrc.n > 0 ? bySrc : lossCat(item.category);
+    const di = demandItem(item.name);
+    const demand = di.enough ? di : demandCat(item.category);
+    return evaluate({
+      item,
+      buy,
+      market,
+      settings: S,
+      saleFee,
+      sourceFee: sourceFeeFor(buy.sourceId),
+      health: buy.manual ? null : health(buy.sourceId),
+      liquidity: liq,
+      ownSales: own,
+      demand,
+      bands: bandsItem(item.name),
+      learnedLoss: learned,
+      compliance: item.compliance,
+      capital: checkLimits({ cost: buy.priceRub, item: item.name, sourceId: buy.sourceId, category: item.category }, snap),
+      verification: verif.get(id) ?? null,
+    });
+  };
+
   const push = (o) => {
+    o.sourceFee = sourceFeeFor(o.buy.sourceId);
+    o.verifiedByTransaction = verifiedByTx.has(o.id);
     out.push(o);
-    if (log && o.eval.status === STATUS.RECOMMENDED) {
-      const f = o.eval.forecast;
-      const now = nowIso();
-      run(
-        `INSERT INTO recommendations(id, watch_id, item, source_id, offer_url, first_seen, last_seen, status, score, forecast_net, forecast_price, buy_cost, data)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, status = excluded.status, score = excluded.score, forecast_net = excluded.forecast_net, forecast_price = excluded.forecast_price, buy_cost = excluded.buy_cost, data = excluded.data`,
-        o.id,
-        o.watchId ?? null,
-        o.name,
-        o.buy.sourceId,
-        o.buy.url ?? '',
-        now,
-        now,
-        o.eval.status,
-        o.eval.score,
-        f?.net ?? null,
-        f?.price ?? null,
-        f?.invested ?? null,
-        JSON.stringify({ blocks: o.eval.blocks, assumptions: o.eval.assumptions }),
-      );
-    }
+    if (!log || ![STATUS.RECOMMENDED, STATUS.CANDIDATE].includes(o.eval.status)) return;
+    const f = o.eval.forecast;
+    const now = nowIso();
+    run(
+      `INSERT INTO recommendations(id, watch_id, item, source_id, offer_url, first_seen, last_seen, status, score, forecast_net, forecast_price, buy_cost, data, engine_version, settings_hash, category, forecast_days)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, status = excluded.status, score = excluded.score, forecast_net = excluded.forecast_net,
+         forecast_price = excluded.forecast_price, buy_cost = excluded.buy_cost, data = excluded.data, engine_version = excluded.engine_version,
+         settings_hash = excluded.settings_hash, category = excluded.category, forecast_days = excluded.forecast_days`,
+      o.id,
+      o.watchId ?? null,
+      o.name,
+      o.buy.sourceId,
+      o.buy.url ?? '',
+      now,
+      now,
+      o.eval.status,
+      o.eval.score,
+      f?.net ?? null,
+      f?.price ?? null,
+      f?.invested ?? null,
+      JSON.stringify({ blocks: o.eval.blocks, assumptions: o.eval.assumptions, gaps: o.eval.executionGaps }),
+      ENGINE_VERSION,
+      hash,
+      o.category,
+      o.eval.daysToSell,
+    );
+    openPaper(o);
   };
 
   const allResults = results.all();
@@ -65,22 +120,12 @@ export function buildOpportunities({ log = false } = {}) {
     const own = ownSalesStats(w.name);
     const liq = liquidity(w.id, own);
     for (const buy of offersOf(r)) {
+      const id = oppId(w.id, buy.sourceId, buy.url);
+      if (only && id !== only) continue;
       const compliance = checkCompliance({ texts: [w.name, buy.title], sectionTitle: fp.title, category: w.category, buyType: buy.knownType });
-      const ev = evaluate({
-        item: { name: w.name, category: w.category, watchId: w.id },
-        buy,
-        market: fp,
-        settings: S,
-        saleFee,
-        sourceFee: sourceFeeFor(buy.sourceId),
-        health: buy.manual ? null : health(buy.sourceId),
-        liquidity: liq,
-        ownSales: own,
-        compliance,
-        cash,
-      });
+      const item = { name: w.name, category: w.category, watchId: w.id, compliance };
       push({
-        id: recId(w.id, buy.sourceId, buy.url),
+        id,
         kind: 'watch',
         watchId: w.id,
         name: w.name,
@@ -90,7 +135,7 @@ export function buildOpportunities({ log = false } = {}) {
         saleFee,
         liquidity: liq,
         compliance,
-        eval: ev,
+        eval: decide({ id, item, buy, market: fp, saleFee, liq, own }),
       });
     }
   }
@@ -100,24 +145,15 @@ export function buildOpportunities({ log = false } = {}) {
     for (const it of d.items) {
       const own = ownSalesStats(it.name);
       for (const raw of it.buys) {
-        // данные автопоиска прежней версии — без времени и сопоставления
-        const buy = { ...raw, fetchedAt: raw.fetchedAt ?? d.scannedAt, match: raw.match ?? LEGACY_MATCH };
+        const id = oppId(null, raw.sourceId, `${d.game}|${it.name}`);
+        if (only && id !== only) continue;
+        // сопоставление пересчитывается с текущей строгостью; данные прежней версии — на проверку
+        const match = raw.match ? matchOffer({}, {}, { category: 'skins', title: it.name, nameExact: true, phase: raw.phase, skinsStrict: S.matching.skinsStrict }) : LEGACY_MATCH;
+        const buy = { ...raw, fetchedAt: raw.fetchedAt ?? d.scannedAt, match };
         const fp = { ...it.funpay, fetchedAt: it.funpay.fetchedAt ?? d.scannedAt };
-        const ev = evaluate({
-          item: { name: it.name, category: 'skins' },
-          buy,
-          market: fp,
-          settings: S,
-          saleFee,
-          sourceFee: sourceFeeFor(buy.sourceId),
-          health: health(buy.sourceId),
-          liquidity: null,
-          ownSales: own,
-          compliance: { level: 'ok', hits: [] },
-          cash,
-        });
+        const compliance = { level: 'ok', hits: [] };
         push({
-          id: recId(null, buy.sourceId, `${d.game}|${it.name}`),
+          id,
           kind: 'discovery',
           name: it.name,
           category: 'skins',
@@ -126,8 +162,8 @@ export function buildOpportunities({ log = false } = {}) {
           market: { min: fp.min, count: fp.count, online: fp.online, sellers: fp.sellers, url: fp.top?.[0]?.url ?? d.funpay.url, sectionUrl: d.funpay.url, pricePer: 1, fetchedAt: fp.fetchedAt },
           saleFee,
           liquidity: null,
-          compliance: { level: 'ok', hits: [] },
-          eval: ev,
+          compliance,
+          eval: decide({ id, item: { name: it.name, category: 'skins', compliance }, buy, market: fp, saleFee, liq: null, own }),
         });
       }
     }

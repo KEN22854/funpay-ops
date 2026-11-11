@@ -40,6 +40,8 @@ export function sanitizeWatch(w, prev) {
       edition: pick(a.edition, EDITIONS),
       phase: str(a.phase, 40),
       requireFloat: Boolean(a.requireFloat),
+      floatMin: a.floatMin === '' || a.floatMin === null || a.floatMin === undefined ? null : Math.min(1, Math.max(0, Number(a.floatMin) || 0)),
+      floatMax: a.floatMax === '' || a.floatMax === null || a.floatMax === undefined ? null : Math.min(1, Math.max(0, Number(a.floatMax) || 0)),
       server: str(a.server, 80),
     },
     manual: (Array.isArray(w.manual) ? w.manual : []).slice(0, 60).map((m) => ({

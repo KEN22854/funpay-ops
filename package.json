@@ -1,7 +1,7 @@
 {
   "name": "funpay-ops",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -10,7 +10,8 @@
     "test": "vitest run",
     "server": "node server/index.mjs",
     "start": "npm run build && node server/index.mjs",
-    "ui": "vite"
+    "ui": "vite",
+    "db:check": "node scripts/db-check.mjs"
   },
   "dependencies": {
     "framer-motion": "^11.11.17",
@@ -32,6 +33,6 @@
     "vitest": "^2.1.9"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.13"
   }
 }

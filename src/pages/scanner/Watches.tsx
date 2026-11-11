@@ -8,7 +8,7 @@ import { CATEGORY_LABEL, MATCH_LABEL, MATCH_TONE, type ScannerState } from './us
 
 type Draft = Omit<Watch, 'id' | 'createdAt'> & { id?: string };
 
-const EMPTY_ATTRS: WatchAttrs = { platform: '', regions: [], type: '', edition: '', phase: '', requireFloat: false, server: '' };
+const EMPTY_ATTRS: WatchAttrs = { platform: '', regions: [], type: '', edition: '', phase: '', requireFloat: false, floatMin: null, floatMax: null, server: '' };
 
 const blank = (): Draft => ({
   name: '',
@@ -407,6 +407,17 @@ function WatchForm({ sc, draft, setDraft, onSave, busy }: { sc: ScannerState; dr
                   <input type="checkbox" className="accent-[rgb(var(--accent))]" checked={draft.attrs.requireFloat} onChange={(e) => updA({ requireFloat: e.target.checked })} />
                   Важен float / паттерн
                 </label>
+                <label className="block">
+                  <span className="label">Float от</span>
+                  <input className="input num" inputMode="decimal" placeholder="0.15" value={draft.attrs.floatMin ?? ''} onChange={(e) => updA({ floatMin: e.target.value === '' ? null : Number(e.target.value.replace(',', '.')) })} />
+                </label>
+                <label className="block">
+                  <span className="label">Float до</span>
+                  <input className="input num" inputMode="decimal" placeholder="0.18" value={draft.attrs.floatMax ?? ''} onChange={(e) => updA({ floatMax: e.target.value === '' ? null : Number(e.target.value.replace(',', '.')) })} />
+                </label>
+                <p className="text-xs text-muted sm:col-span-2">
+                  Лоты FunPay с указанным float вне диапазона не учитываются в цене конкурентов. У площадок-источников float в выгрузках нет — такие пары подтверждаются вручную.
+                </p>
               </div>
             ) : (
               <div className="grid gap-3 sm:grid-cols-3">
