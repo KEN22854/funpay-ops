@@ -20,18 +20,20 @@ import { allHealth, downtimeMin, pruneHealth } from './repo/health.mjs';
 import { prunesnapshots } from './repo/history.mjs';
 import * as inv from './repo/inventory.mjs';
 import { abcXyz, comparePeriods, exportCsv, metrics, recommendationQuality } from './repo/analytics.mjs';
-import { createBackup, listBackups, pruneBackups, restoreBackup, verifyBackup } from './repo/backup.mjs';
+import { createBackup, listBackups, pruneBackups, restoreBackup, verifyBackup, backupKeySet, encryptBackup, restoreDrill } from './repo/backup.mjs';
 import { botInfo, escape, notify, recentNotifications, send, setToken, startBot, telegramConfigured } from './notify/telegram.mjs';
 import { STATUS } from './core/engine.mjs';
 import { ENGINE_VERSION } from './core/finance.mjs';
 import { verifyOpportunity } from './verify.mjs';
-import { recordAttempt, sourceQuality } from './repo/quality.mjs';
+import { decisions as decisionCenter } from './decisions.mjs';
+import { recordAttempt, sourcePolicy, sourceQuality } from './repo/quality.mjs';
 import { aging, capitalSnapshot, cashFlowForecast, listCashReservations, releaseCash, reserveCash } from './repo/risk.mjs';
 import { priceBands, sellProbability, weekdayProfile } from './repo/demand.mjs';
 import { closeDuePaper, paperStats } from './repo/paper.mjs';
-import { backtestRuns, runBacktest } from './repo/backtest.mjs';
+import { backtestRuns, replayBacktest, runBacktest } from './repo/backtest.mjs';
 import { productMetrics } from './repo/metrics.mjs';
-import { authEnabled, checkAuth, login, logout, rateLimit } from './lib/auth.mjs';
+import { authEnabled, checkAuth, listSessions, login, logout, pruneSessions, rateLimit, revokeOthers, revokeSession } from './lib/auth.mjs';
+import { apiMetrics, errorLog, pruneErrors, recordRequest } from './lib/ops.mjs';
 
 const PORT = Number(process.env.FPO_PORT || 5181);
 // по умолчанию — только локально; сервер в сети (FPO_HOST) требует FPO_AUTH_TOKEN — см. docs/DEPLOY.md
@@ -208,6 +210,19 @@ function maintenance() {
   }
   pruneHealth(30);
   prunesnapshots(120);
+  pruneSessions();
+  pruneErrors(30);
+  // учения по восстановлению раз в неделю: копия реально открывается и читается
+  try {
+    const lastDrill = one('SELECT max(drill_at) t FROM backups')?.t;
+    if (one('SELECT 1 x FROM backups LIMIT 1') && (!lastDrill || Date.now() - new Date(lastDrill).getTime() > 7 * 86400_000)) {
+      const d = restoreDrill();
+      log(`учения по восстановлению: ${d.ok ? 'ok' : 'ОШИБКА'} (${d.source ?? '—'}, ${d.ms} мс)`);
+      if (!d.ok) notify('backup', `drill:${nowIso().slice(0, 10)}`, `❗ Учения по восстановлению не прошли: ${escape(d.error ?? d.integrity ?? '')}`);
+    }
+  } catch (e) {
+    log('учения по восстановлению:', e.message);
+  }
 }
 setInterval(maintenance, 60 * 60_000);
 
@@ -233,6 +248,7 @@ function diagnostics() {
   add('Свежесть данных', stale.length === 0 ? true : null, stale.length ? `устарели: ${stale.map((w) => w.name).join(', ')}` : 'все товары в пределах TTL');
   const unconfirmed = listFees().filter((f) => f.active && f.scope === 'funpay_section').length;
   add('Комиссии FunPay', unconfirmed > 0 ? true : null, unconfirmed ? `профилей разделов: ${unconfirmed}` : 'ни одной подтверждённой комиссии раздела — используется значение по умолчанию');
+  add('Шифрование бэкапов', backupKeySet() ? true : null, backupKeySet() ? `AES-256-GCM${process.env.FPO_BACKUP_EXTERNAL_DIR ? ', копии во внешней папке' : ', копии рядом с бэкапами (задайте FPO_BACKUP_EXTERNAL_DIR)'}` : 'не включено: задайте FPO_BACKUP_KEY (16+ символов)');
   add('Telegram', telegramConfigured() ? true : null, telegramConfigured() ? 'токен задан (хранится в data/secrets.json)' : 'не настроен');
   return { checkedAt: nowIso(), checks };
 }
@@ -392,7 +408,9 @@ const routes = [
   ['GET', /^\/api\/quality\/sources$/, () => {
     // автоматические источники + ручные, по которым были попытки закупки
     const ids = new Set(['funpay', ...SOURCES.filter((s) => s.adapter).map((s) => s.id), ...all('SELECT DISTINCT source_id FROM execution_attempts').map((r) => r.source_id)]);
-    return Object.fromEntries([...ids].map((id) => [id, sourceQuality(id)]));
+    const S = getSettings();
+    ids.delete('funpay');
+    return Object.fromEntries([...ids].map((id) => [id, { ...sourceQuality(id), policy: sourcePolicy(id, {}, S) }]));
   }],
   ['GET', /^\/api\/demand$/, (_q, _m, url) => {
     const item = url.searchParams.get('item') || undefined;
@@ -408,12 +426,21 @@ const routes = [
     return idem(req, 'cash-reserve', () => reserveCash(b));
   }],
   ['POST', /^\/api\/cash\/reserve\/([\w-]+)\/release$/, (req, m) => idem(req, `cash-release:${m[1]}`, () => releaseCash(m[1]))],
+  ['GET', /^\/api\/decisions$/, () => decisionCenter()],
   ['GET', /^\/api\/paper$/, () => paperStats()],
   ['GET', /^\/api\/backtest$/, () => backtestRuns()],
   ['POST', /^\/api\/backtest$/, async (req) => runBacktest(await readBody(req))],
+  ['POST', /^\/api\/backtest\/(\d+)\/replay$/, (_req, m) => replayBacktest(m[1])],
   ['GET', /^\/api\/metrics\/product$/, (_q, _m, url) => productMetrics(range(url))],
   ['GET', /^\/api\/audit$/, (_q, _m, url) => auditLog({ entity: url.searchParams.get('entity') || undefined })],
   ['GET', /^\/api\/backups$/, () => listBackups()],
+  ['POST', /^\/api\/backups\/drill$/, () => restoreDrill()],
+  ['POST', /^\/api\/backups\/([\w.-]+)\/encrypt$/, (_q, m) => encryptBackup(m[1])],
+  ['GET', /^\/api\/sessions$/, (req) => listSessions(req)],
+  ['POST', /^\/api\/sessions\/others\/revoke$/, (req) => revokeOthers(req)],
+  ['POST', /^\/api\/sessions\/([0-9a-f]{12})\/revoke$/, (_q, m) => revokeSession(m[1])],
+  ['GET', /^\/api\/ops\/metrics$/, () => apiMetrics()],
+  ['GET', /^\/api\/ops\/errors$/, () => errorLog()],
   ['POST', /^\/api\/backups$/, () => createBackup('manual')],
   ['POST', /^\/api\/backups\/([\w.-]+)\/verify$/, (_q, m) => verifyBackup(m[1])],
   ['POST', /^\/api\/backups\/([\w.-]+)\/restore$/, async (req, m) => {
@@ -457,6 +484,7 @@ const RATE = [
   [/^\/api\/discover$/, 3],
   [/^\/api\/verify\//, 20],
   [/^\/api\/backtest$/, 5],
+  [/^\/api\/backtest\/\d+\/replay$/, 5],
   [/^\/api\/backups/, 10],
 ];
 
@@ -488,13 +516,16 @@ const server = createServer(async (req, res) => {
   }
   const route = routes.find(([m, re]) => m === req.method && re.test(url.pathname));
   if (!route) return json(res, 404, { error: 'нет такого метода API' });
+  const t0 = performance.now();
   try {
     const body = await route[2](req, url.pathname.match(route[1]), url);
     json(res, 200, body);
+    recordRequest(req.method, url.pathname, 200, performance.now() - t0);
   } catch (e) {
     const status = e.status || (e.code === 'input' ? 400 : 502);
     if (status >= 500) log('ошибка API', req.method, url.pathname, e.message);
     json(res, status, { error: e.message, code: e.code });
+    recordRequest(req.method, url.pathname, status, performance.now() - t0, e.message);
   }
 });
 
@@ -520,7 +551,19 @@ function botCommands() {
   const period = (days) => ({ from: new Date(Date.now() - days * 86400_000).toISOString(), to: new Date(Date.now() + 1000).toISOString(), mode: 'real' });
   return {
     '/start': () =>
-      'FunPay Ops — команды:\n/status — система и источники\n/opportunities — проверенные возможности\n/profit [дней] — прибыль\n/report — отчёт за неделю\n/market — рынок\n/orders — последние продажи\n/inventory — остатки\n/alerts — уведомления\n/sources — здоровье источников',
+      'FunPay Ops — команды:\n/todo — что сделать сейчас (Decision Center)\n/status — система и источники\n/opportunities — проверенные возможности\n/profit [дней] — прибыль\n/report — отчёт за неделю\n/market — рынок\n/orders — последние продажи\n/inventory — остатки\n/alerts — уведомления\n/sources — здоровье источников',
+    '/todo': () => {
+      const { decisions: list, summary } = decisionCenter();
+      if (!list.length) return 'Сейчас действий не требуется.';
+      const icon = { 1: '🔴', 2: '🟠', 3: '⚪' };
+      return (
+        `<b>Что сделать сейчас</b> (${summary.total})\n` +
+        list
+          .slice(0, 8)
+          .map((d) => `${icon[d.priority]} ${escape(d.title)}${d.impactRub ? ` (${d.impactRub > 0 ? '+' : ''}${rub(d.impactRub)})` : ''}`)
+          .join('\n')
+      );
+    },
     '/status': () => {
       const d = diagnostics();
       return `<b>Состояние</b>\n${d.checks.map((c) => `${c.status === 'ok' ? '✅' : c.status === 'warn' ? '⚠️' : '❌'} ${escape(c.name)}: ${escape(c.detail)}`).join('\n')}`;

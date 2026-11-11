@@ -15,6 +15,9 @@ export function ServerAdmin() {
   const [notes, setNotes] = useState<Awaited<ReturnType<typeof api.notifications>>>([]);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [offline, setOffline] = useState(false);
+  const [sessions, setSessions] = useState<Awaited<ReturnType<typeof api.sessions>> | null>(null);
+  const [ops, setOps] = useState<Awaited<ReturnType<typeof api.opsMetrics>> | null>(null);
+  const [errors, setErrors] = useState<Awaited<ReturnType<typeof api.opsErrors>>>([]);
 
   const load = useCallback(async () => {
     try {
@@ -27,6 +30,10 @@ export function ServerAdmin() {
       setAudit(a);
       setNotes(n);
       setOffline(false);
+      const [ss, om, oe] = await Promise.all([api.sessions(), api.opsMetrics(), api.opsErrors()]);
+      setSessions(ss);
+      setOps(om);
+      setErrors(oe);
     } catch {
       setOffline(true);
     }
@@ -178,7 +185,22 @@ export function ServerAdmin() {
             Сохранить
           </button>
         </div>
-        <p className="mb-2 text-xs text-muted">Каждая копия проверяется сразу: открывается отдельно, проходит integrity_check и сверку количества строк. Перед восстановлением текущая база сама сохраняется в копию.</p>
+        <p className="mb-2 text-xs text-muted">
+          Каждая копия проверяется сразу: открывается отдельно, проходит integrity_check и сверку количества строк. Перед восстановлением текущая база сама сохраняется в копию. Раз в неделю проходят{' '}
+          <b>учения по восстановлению</b>: последняя копия (зашифрованная, если задан ключ) расшифровывается и читается отдельно от рабочей базы.
+        </p>
+        <p className="mb-3 text-xs text-muted">
+          Шифрование: задайте <code>FPO_BACKUP_KEY</code> (16+ символов) — к каждой копии добавится файл <code>.enc</code> (AES-256-GCM). <code>FPO_BACKUP_EXTERNAL_DIR</code> — папка облачного диска или
+          флешки для зашифрованных копий. Ключ храните отдельно: без него копию не открыть.
+        </p>
+        <div className="mb-3 flex justify-end">
+          <button className="btn-ghost text-xs" onClick={() => act(async () => {
+            const d = await api.restoreDrill();
+            if (!d.ok) throw new Error(`учения не прошли: ${d.error ?? 'проверка целостности'}`);
+          }, 'Учения по восстановлению пройдены')}>
+            Провести учения сейчас
+          </button>
+        </div>
         {backups.length === 0 ? (
           <Empty>Копий нет.</Empty>
         ) : (
@@ -190,7 +212,11 @@ export function ServerAdmin() {
                   <td className="num text-xs">{b.file}</td>
                   <td className="text-xs text-muted">{fmtDateTime(b.created_at)}</td>
                   <td className="num text-right text-xs">{(b.size / 1024).toFixed(0)} КБ</td>
-                  <td>{!b.exists ? <Badge tone="muted">удалена</Badge> : b.verify_ok ? <Badge tone="good">проверена</Badge> : <Badge tone="bad">не прошла проверку</Badge>}</td>
+                  <td className="space-x-1 whitespace-nowrap">
+                    {!b.exists ? <Badge tone="muted">удалена</Badge> : b.verify_ok ? <Badge tone="good">проверена</Badge> : <Badge tone="bad">не прошла проверку</Badge>}
+                    {b.encrypted_file && <Badge tone="accent">зашифрована</Badge>}
+                    {b.drill_at && (b.drill_ok ? <Badge tone="good">учения ✓</Badge> : <Badge tone="bad">учения ✕</Badge>)}
+                  </td>
                   <td className="whitespace-nowrap text-right text-xs">
                     {b.exists && (
                       <>
@@ -213,6 +239,88 @@ export function ServerAdmin() {
           </div>
         )}
       </Card>
+
+      {sessions?.enabled && (
+        <Card
+          title={`Сессии входа (срок ${sessions.policy.ttlDays} дн., без активности — ${sessions.policy.idleDays} дн.)`}
+          right={
+            <button className="btn-ghost text-xs" onClick={() => act(() => api.revokeOtherSessions(), 'Другие сессии закрыты')}>
+              Выйти на других устройствах
+            </button>
+          }
+        >
+          <div className="overflow-x-auto">
+            <table className="table">
+              <tbody>
+                {sessions.sessions.map((x) => (
+                  <tr key={x.id}>
+                    <td className="text-xs">
+                      {x.current && <Badge tone="good">эта</Badge>} {x.user_agent?.slice(0, 60) ?? '—'}
+                    </td>
+                    <td className="num text-xs text-muted">{x.ip}</td>
+                    <td className="text-xs text-muted">вход {fmtDateTime(x.created_at)}</td>
+                    <td className="text-xs text-muted">активна {fmtDateTime(x.last_seen)}</td>
+                    <td className="text-right text-xs">
+                      {!x.current && (
+                        <button className="text-bad hover:underline" onClick={() => act(() => api.revokeSession(x.id), 'Сессия закрыта')}>
+                          закрыть
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {ops && (
+        <Card title={`API: ${ops.total} запросов с ${fmtDateTime(ops.since)}, ошибок 5xx ${ops.errors} (${(ops.errorRate * 100).toFixed(1)}%), память ${ops.memoryMb} МБ`}>
+          {ops.routes.length === 0 ? (
+            <Empty>Запросов ещё не было.</Empty>
+          ) : (
+            <div className="max-h-80 overflow-auto">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Маршрут</th>
+                    <th className="text-right">Запросов</th>
+                    <th className="text-right">5xx</th>
+                    <th className="text-right">4xx</th>
+                    <th className="text-right">p50, мс</th>
+                    <th className="text-right">p95, мс</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ops.routes.slice(0, 40).map((r) => (
+                    <tr key={r.route}>
+                      <td className="num text-xs">{r.route}</td>
+                      <td className="num text-right">{r.count}</td>
+                      <td className={`num text-right ${r.errors ? 'text-bad' : ''}`}>{r.errors}</td>
+                      <td className="num text-right text-muted">{r.clientErrors}</td>
+                      <td className="num text-right">{r.p50?.toFixed(0) ?? '—'}</td>
+                      <td className={`num text-right ${(r.p95 ?? 0) > 2000 ? 'text-warn' : ''}`}>{r.p95?.toFixed(0) ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {errors.length > 0 && (
+            <details className="mt-3 text-xs">
+              <summary className="cursor-pointer text-bad">Журнал ошибок сервера ({errors.length})</summary>
+              <ul className="mt-2 max-h-60 space-y-1 overflow-auto">
+                {errors.map((e) => (
+                  <li key={e.id}>
+                    <span className="num text-muted">{fmtDateTime(e.ts)}</span> {e.status} {e.method} {e.route} — {e.message}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </Card>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card title="Журнал действий">

@@ -13,6 +13,8 @@ export default defineConfig({
     proxy: { '/api': 'http://127.0.0.1:5181' },
   },
   test: {
+    // e2e/ — Playwright (npm run e2e), не Vitest
+    exclude: ['**/node_modules/**', '**/dist/**', 'e2e/**'],
     // тесты работают на базе в памяти и временной папке — реальные data/ не трогаются
     env: {
       FPO_DB: ':memory:',

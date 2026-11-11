@@ -73,12 +73,14 @@ export function capitalSnapshot(mode = 'real') {
  * Проверка лимитов для новой закупки стоимостью cost.
  * @returns {{ blocks: string[], warnings: string[] }}
  */
-export function checkLimits({ cost, item, sourceId, category }, snap = capitalSnapshot('real')) {
+export function checkLimits({ cost, item, sourceId, category, limitFactor = 1 }, snap = capitalSnapshot('real')) {
   const R = getSettings().risk;
+  // политика источника сужает лимиты: испытательный срок — половина обычной доли и суммы сделки
+  const k = Math.max(0, Math.min(1, Number(limitFactor)));
   const blocks = [];
   const warnings = [];
-  const maxDeal = getSettings().inventory.maxPurchaseRub;
-  if (maxDeal > 0 && cost > maxDeal) blocks.push(`сделка ${cost.toFixed(0)} ₽ больше лимита на сделку ${maxDeal} ₽`);
+  const maxDeal = getSettings().inventory.maxPurchaseRub * k;
+  if (maxDeal > 0 && cost > maxDeal) blocks.push(`сделка ${cost.toFixed(0)} ₽ больше лимита на сделку ${maxDeal.toFixed(0)} ₽${k < 1 ? ` (×${k} по политике источника)` : ''}`);
   if (snap.freeCash !== null && cost > snap.freeCash) blocks.push(`не хватает свободных денег: ${snap.freeCash.toFixed(0)} ₽ (с учётом резерва ${snap.reserved.toFixed(0)} ₽)`);
   // доли считаются от известного капитала (касса + запасы); без кассы капитал неизвестен — только предупреждение
   const total = snap.total;
@@ -88,14 +90,14 @@ export function checkLimits({ cost, item, sourceId, category }, snap = capitalSn
   }
   const share = (cur) => ((cur + cost) / total) * 100;
   const checks = [
-    ['товар', item, snap.byItem[item] ?? 0, R.maxItemSharePct],
-    ['источник', sourceId, snap.bySource[sourceId] ?? 0, R.maxSourceSharePct],
+    ['товар', item, snap.byItem[item] ?? 0, R.maxItemSharePct * k],
+    ['источник', sourceId, snap.bySource[sourceId] ?? 0, R.maxSourceSharePct * k],
     ['категория', category, snap.byCategory[category ?? ''] ?? 0, R.maxCategorySharePct],
   ];
   for (const [label, key, cur, limit] of checks) {
     if (!limit || !key) continue;
     const s = share(cur);
-    if (s > limit) blocks.push(`доля капитала в ${label === 'категория' ? 'категории' : label === 'источник' ? 'источнике' : 'товаре'} «${key}» станет ${s.toFixed(0)}% (лимит ${limit}%)`);
+    if (s > limit) blocks.push(`доля капитала в ${label === 'категория' ? 'категории' : label === 'источник' ? 'источнике' : 'товаре'} «${key}» станет ${s.toFixed(0)}% (лимит ${+limit.toFixed(1)}%)`);
     else if (s > limit * 0.8) warnings.push(`доля капитала в «${key}» приближается к лимиту: ${s.toFixed(0)}% из ${limit}%`);
   }
   return { blocks, warnings };

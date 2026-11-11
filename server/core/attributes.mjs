@@ -1,7 +1,7 @@
 // Атрибуты товара и сопоставление: VERIFIED / REVIEW_REQUIRED / REJECTED с причинами.
 // Правило: несовпадение обязательного атрибута → REJECTED; атрибут неизвестен → REVIEW_REQUIRED.
 // Рекомендацию получает только VERIFIED (правилами или вручную).
-import { norm } from '../lib/match.mjs';
+import { norm, seriesNumbers } from '../lib/match.mjs';
 
 export const PLATFORMS = ['pc', 'ps', 'xbox', 'switch', 'mobile'];
 export const REGIONS = ['ru', 'cis', 'global', 'eu', 'us', 'tr', 'kz', 'ua', 'ar', 'in', 'cn', 'by'];
@@ -18,52 +18,52 @@ const has = (t, re) => re.test(t);
 const W = (s) => new RegExp(`(?:^|[^\\p{L}\\p{N}])(?:${s})(?:$|[^\\p{L}\\p{N}])`, 'u');
 
 const PLATFORM_RE = [
-  ['ps', W('ps4|ps5|playstation|psn|пс4|пс5')],
+  ['ps', W('ps4|ps5|playstation|psn|пс4|пс5|плейстейшн|плойк\\p{L}*|sony')],
   ['xbox', W('xbox|xbox one|series x|series s|иксбокс')],
-  ['switch', W('switch|nintendo|свитч')],
+  ['switch', W('switch|nintendo|свитч|нинтендо')],
   ['mobile', W('android|ios|iphone|мобильн')],
   ['pc', W('pc|пк|steam|стим|epic games|egs|gog|ubisoft connect|uplay|ea app|origin|battle net|microsoft store|windows')],
 ];
 
 const REGION_RE = [
-  ['ru', W('рф|россия|russia|ru|rus')], // «рус/русский» — язык, а не регион
+  ['ru', W('рф|росси\\p{L}{0,3}|russia|ru|rus|российск\\p{L}*')], // «рус/русский» — язык, а не регион
   ['cis', W('снг|cis')],
-  ['global', W('global|глобал|worldwide|весь мир|row')],
-  ['eu', W('eu|europe|европа')],
+  ['global', W('global|глобал\\p{L}*|worldwide|весь мир|row|region free|без региона')],
+  ['eu', W('eu|europe|европ\\p{L}{0,2}|европейск\\p{L}*')],
   ['us', W('us|usa|сша|na|north america')],
-  ['tr', W('tr|турция|turkey|türkiye')],
-  ['kz', W('kz|казахстан|kazakhstan|kzt')],
-  ['ua', W('ua|украина|ukraine|uah')],
-  ['ar', W('ar|аргентина|argentina')],
-  ['in', W('india|индия')],
-  ['cn', W('cn|китай|china')],
+  ['tr', W('tr|турц\\p{L}{0,2}|турецк\\p{L}*|turkey|türkiye|turkish')],
+  ['kz', W('kz|казахстан\\p{L}{0,2}|казахстанск\\p{L}*|kazakhstan|kzt')],
+  ['ua', W('ua|украин\\p{L}{0,2}|украинск\\p{L}*|ukraine|uah')],
+  ['ar', W('ar|аргентин\\p{L}{0,2}|argentina|ars')],
+  ['in', W('india|инди\\p{L}|indian')],
+  ['cn', W('cn|кита\\p{L}{1,2}|china|chinese')],
   ['by', W('рб|беларусь|belarus')],
 ];
 
 const TYPE_RE = [
-  ['rent', W('аренда|аренду|rent|прокат')],
+  ['rent', W('аренд\\p{L}{0,2}|rent|rental|прокат')],
   ['offline', W('offline|оффлайн|офлайн|офф лайн')],
-  ['account', W('аккаунт|акк|account|steam guard|общий|shared|с заходом на аккаунт|логин|login')],
+  ['account', W('аккаунт\\p{L}{0,2}|акк|account|steam guard|общий|shared|с заходом на аккаунт|логин|login')],
   ['topup', W('пополнение|top up|topup|wallet')],
-  ['gift', W('гифт|gift|подарок|подарком')],
-  ['key', W('ключ|key|cd key|cdkey|код активации|activation code')],
+  ['gift', W('гифт\\p{L}{0,2}|gift|подар\\p{L}{0,4}')],
+  ['key', W('ключ\\p{L}{0,2}|key|cd key|cdkey|код активации|activation code|redeem code')],
 ];
 
 const EDITION_RE = [
   ['ultimate', W('ultimate|ультимейт')],
-  ['deluxe', W('deluxe|делюкс|digital deluxe')],
-  ['gold', W('gold edition|голд')],
+  ['deluxe', W('deluxe|делюкс|digital deluxe|расширенн\\p{L}* издани\\p{L}*')],
+  ['gold', W('gold edition|голд|золот\\p{L}* издани\\p{L}*')],
   ['premium', W('premium')],
-  ['complete', W('complete edition|complete|комплит')],
-  ['goty', W('goty|game of the year')],
+  ['complete', W('complete edition|complete|комплит|полн\\p{L}* издани\\p{L}*')],
+  ['goty', W('goty|game of the year|издание игра года|игра года')],
   ['collector', W('collector|коллекционн')],
   ['definitive', W('definitive')],
   ['legendary', W('legendary')],
-  ['standard', W('standard|стандарт')],
+  ['standard', W('standard|стандарт\\p{L}*')],
 ];
 
 /** признаки «это не сама игра»: DLC, наборы, бандлы */
-const ADDON_RE = W('dlc|дополнение|season pass|сезонный пропуск|pack|набор|bundle|бандл|soundtrack|саундтрек|artbook|upgrade|апгрейд');
+const ADDON_RE = W('dlc|дополнени\\p{L}|season pass|сезонный пропуск|pack|набор|bundle|бандл|soundtrack|саундтрек|artbook|upgrade|апгрейд|expansion|addon|add on');
 const COMBO_RE = /\+\s*([\p{L}\p{N}][\p{L}\p{N}'’]*)/gu; // «Игра A + Игра B»
 
 /** «A + B» — набор; но «РФ+СНГ», «PC + Xbox», «+ бонус» — нет */
@@ -91,6 +91,62 @@ export function parseFloatValue(text) {
   return m ? Number(m[1].replace(',', '.')) : null;
 }
 
+/** paint seed / паттерн: «Pattern: 661», «paint seed 387», «паттерн 151», «seed: 55» */
+export function parsePaintSeed(text) {
+  const m = String(text ?? '').match(/(?:paint\s*seed|pattern(?:\s*(?:id|template|index))?|seed|паттерн|сид)\s*[:#№=-]?\s*(\d{1,4})(?!\d|[.,]\d)/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n >= 0 && n <= 1000 ? n : null;
+}
+
+/**
+ * Наклейки: «Stickers: iBUYPOWER (Holo) | Katowice 2014, Titan», «Наклейки: …».
+ * Возвращает null, если о наклейках ничего не сказано; [] — «без наклеек».
+ */
+export function parseStickers(text) {
+  const s = String(text ?? '');
+  if (/(?:без наклеек|no stickers|stickers?\s*:\s*(?:нет|none|no)\b)/i.test(s)) return [];
+  const m = s.match(/(?:stickers?|наклейк\p{L}*)\s*[:-]\s*([^\n;]{2,300})/iu);
+  if (!m) return null;
+  return m[1]
+    .split(/[,;]/)
+    .map((x) => norm(x).replace(/^sticker\s+/, ''))
+    .filter((x) => x.length > 1)
+    .slice(0, 6);
+}
+
+/** Срок подписки/аренды в днях: «1 месяц», «12 months», «3 мес», «1 год», «30 дней» */
+export function parseDurationDays(text) {
+  const t = norm(text);
+  const m = t.match(/(\d{1,3})\s*(мес\p{L}*|month\p{L}*|mo|m|дн\p{L}*|day\p{L}*|d|год\p{L}*|лет|year\p{L}*|y|недел\p{L}*|week\p{L}*|w)(?![\p{L}\p{N}])/u);
+  if (!m) {
+    if (/(?:^|\s)(?:месяц|month|monthly)(?:$|\s)/u.test(t)) return 30;
+    if (/(?:^|\s)(?:год|year|yearly|annual|годовая)(?:$|\s)/u.test(t)) return 365;
+    return null;
+  }
+  const n = Number(m[1]);
+  const u = m[2];
+  if (/^(мес|month|mo$|m$)/.test(u)) return n * 30;
+  if (/^(год|лет|year|y$)/.test(u)) return n * 365;
+  if (/^(недел|week|w$)/.test(u)) return n * 7;
+  return n;
+}
+
+/**
+ * Схемы атрибутов по категориям: что определяет «тот же товар».
+ * required — без этого атрибута в карточке пара проверяется только по названию (подсказка в интерфейсе);
+ * fromText — что парсер умеет достать из текста лота.
+ */
+export const CATEGORY_SCHEMAS = {
+  keys: { required: ['type', 'platform', 'regions'], optional: ['edition'], note: 'тип (ключ/подарок), платформа и регион активации; издание — если цена зависит' },
+  subscriptions: { required: ['durationDays', 'regions'], optional: ['type'], note: 'срок подписки и регион; аккаунт или код — тип' },
+  currency: { required: ['server'], optional: [], note: 'сервер/регион игры' },
+  skins: { required: [], optional: ['phase', 'floatMin', 'floatMax', 'paintSeeds', 'stickers'], note: 'точное название, фаза, float, paint seed и наклейки — если влияют на цену' },
+  accounts: { required: ['platform', 'regions'], optional: [], note: 'платформа и регион аккаунта' },
+  items: { required: ['server'], optional: [], note: 'сервер игры' },
+  services: { required: [], optional: [], note: 'проверка по названию' },
+};
+
 /** Предметы, цена которых зависит от фазы/паттерна/float — по одному названию не сопоставить */
 const PATTERN_SENSITIVE = /doppler|case hardened|fade|marble fade|crimson web|slaughter|heat treated|blue gem|ruby|sapphire|emerald|black pearl/i;
 
@@ -106,6 +162,10 @@ export function extractAttrs(text) {
   out.combo = isCombo(String(text ?? ''));
   out.restrictions = RESTRICTION_RE.filter(([re]) => re.test(t)).map(([, text, blocksRu]) => ({ text, blocksRu }));
   out.float = parseFloatValue(text);
+  out.paintSeed = parsePaintSeed(text);
+  out.stickers = parseStickers(text);
+  out.durationDays = parseDurationDays(text);
+  out.series = seriesNumbers(text);
   return out;
 }
 
@@ -182,10 +242,31 @@ export function matchOffer(offerAttrs, req = {}, ctx = {}) {
       if (fl === null) review(`float не указан (нужен ${req.floatMin}–${req.floatMax})`);
       else if (fl < req.floatMin || fl > req.floatMax) reject(`float ${fl}, нужен ${req.floatMin}–${req.floatMax}`);
       else pass(`float ${fl}`);
-    } else if (req.requireFloat) review('float/paint seed источником не передаются — проверьте вручную');
-    // строгая идентификация: float, паттерн и наклейки влияют на цену любого скина
+    } else if (req.requireFloat && fl === null) review('float/paint seed источником не передаются — проверьте вручную');
+    // paint seed: список допустимых паттернов (blue gem, fire & ice и т.п.)
+    const seed = ctx.paintSeed ?? offerAttrs.paintSeed ?? null;
+    const seeds = req.paintSeeds ?? [];
+    if (seeds.length) {
+      if (seed === null) review(`paint seed не указан (нужен ${seeds.join(', ')})`);
+      else if (seeds.includes(seed)) pass(`paint seed ${seed}`);
+      else reject(`paint seed ${seed}, нужен ${seeds.join(', ')}`);
+    }
+    // наклейки: все требуемые должны быть у предмета; «без наклеек» — пустой список
+    const st = ctx.stickers ?? offerAttrs.stickers ?? null;
+    const need = (req.stickers ?? []).map(norm).filter(Boolean);
+    if (need.length) {
+      if (st === null) review(`наклейки не указаны (нужны: ${need.join(', ')})`);
+      else {
+        const missing = need.filter((n) => !st.some((x) => x.includes(n)));
+        if (missing.length) reject(`нет наклеек: ${missing.join(', ')}`);
+        else pass(`наклейки: ${need.join(', ')}`);
+      }
+    }
+    // строгая идентификация: float, паттерн и наклейки влияют на цену любого скина.
+    // Если источник передал все три — подтверждать вручную не нужно.
     if (ctx.side !== 'funpay' && ctx.skinsStrict !== 'pattern' && status === 'VERIFIED') {
-      review('float, paint seed, паттерн и наклейки источник не передаёт — подтвердите предмет вручную (строгий режим)');
+      if (fl !== null && seed !== null && st !== null) pass('float, paint seed и наклейки переданы источником');
+      else review('float, paint seed, паттерн и наклейки источник не передаёт — подтвердите предмет вручную (строгий режим)');
     }
     return { status, source: 'rules', reasons };
   }
@@ -247,6 +328,26 @@ export function matchOffer(offerAttrs, req = {}, ctx = {}) {
     else review(`издание не указано (нужно ${req.edition})`);
   }
 
+  // ── номер части серии: «Dying Light» ≠ «Dying Light 2»
+  if ((cat === 'keys' || cat === 'accounts') && ctx.watchName && offerAttrs.series) {
+    const want = seriesNumbers(ctx.watchName);
+    const got = offerAttrs.series;
+    const extra = got.filter((n) => !want.includes(n));
+    if (want.length && want.every((n) => got.includes(n))) pass(`часть ${want.join(', ')}`);
+    else if (want.length && extra.length) reject(`другая часть серии: ${extra.join(', ')} вместо ${want.join(', ')}`);
+    else if (want.length && ctx.side !== 'funpay') review(`номер части (${want.join(', ')}) не указан в названии`);
+    else if (extra.length && ctx.side !== 'funpay') review(`в названии номер ${extra.join(', ')} — возможно, другая часть серии`);
+  }
+
+  // ── срок подписки
+  if (req.durationDays) {
+    const d = offerAttrs.durationDays ?? null;
+    const label = (x) => (x % 365 === 0 ? `${x / 365} г.` : x % 30 === 0 ? `${x / 30} мес.` : `${x} дн.`);
+    if (d === null) review(`срок не указан (нужен ${label(req.durationDays)})`);
+    else if (Math.abs(d - req.durationDays) <= Math.max(1, req.durationDays * 0.04)) pass(`срок ${label(d)}`);
+    else reject(`срок ${label(d)}, нужен ${label(req.durationDays)}`);
+  }
+
   if (cat === 'currency' && req.server) {
     const t = norm(ctx.title ?? '');
     if (t.includes(norm(req.server))) pass(`сервер ${req.server}`);
@@ -254,7 +355,17 @@ export function matchOffer(offerAttrs, req = {}, ctx = {}) {
   }
 
   if (!reasons.length) review('обязательные атрибуты не заданы в карточке — проверка только по названию');
-  return { status, source: 'rules', reasons };
+  return { status, source: 'rules', reasons, schemaGaps: schemaGaps(cat, req) };
+}
+
+/** какие атрибуты схемы категории не заданы в карточке */
+export function schemaGaps(category, req = {}) {
+  const s = CATEGORY_SCHEMAS[category];
+  if (!s) return [];
+  return s.required.filter((k) => {
+    const v = req[k];
+    return v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length);
+  });
 }
 
 export const isPatternSensitive = (name) => PATTERN_SENSITIVE.test(name ?? '');

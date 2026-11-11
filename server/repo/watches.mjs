@@ -43,6 +43,16 @@ export function sanitizeWatch(w, prev) {
       floatMin: a.floatMin === '' || a.floatMin === null || a.floatMin === undefined ? null : Math.min(1, Math.max(0, Number(a.floatMin) || 0)),
       floatMax: a.floatMax === '' || a.floatMax === null || a.floatMax === undefined ? null : Math.min(1, Math.max(0, Number(a.floatMax) || 0)),
       server: str(a.server, 80),
+      /** допустимые paint seed (0–1000) */
+      paintSeeds: (Array.isArray(a.paintSeeds) ? a.paintSeeds : String(a.paintSeeds ?? '').split(/[,\s]+/))
+        .filter((x) => x !== '' && x !== null && x !== undefined)
+        .map((x) => Number(x))
+        .filter((x) => Number.isInteger(x) && x >= 0 && x <= 1000)
+        .slice(0, 50),
+      /** обязательные наклейки (фразы) */
+      stickers: list(a.stickers, 100).slice(0, 6),
+      /** срок подписки, дней (0 — не проверяется) */
+      durationDays: Math.max(0, Math.min(3650, Math.round(Number(a.durationDays) || 0))) || null,
     },
     manual: (Array.isArray(w.manual) ? w.manual : []).slice(0, 60).map((m) => ({
       sourceId: str(m.sourceId, 60),

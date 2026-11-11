@@ -37,8 +37,10 @@ export const LEGACY_MATCH = { status: 'REVIEW_REQUIRED', source: 'rules', reason
  * @param {object} [p.capital]     checkLimits() — { blocks, warnings }
  * @param {object} [p.verification] последняя перепроверка связки
  */
+const POLICY_LABEL = { trusted: 'надёжный', normal: 'обычный', probation: 'испытательный срок', blocked: 'заблокирован' };
+
 export function evaluate(p) {
-  const { item, market, settings: S, saleFee, sourceFee, health, liquidity, ownSales, demand, bands, learnedLoss, compliance, capital, verification } = p;
+  const { item, market, settings: S, saleFee, sourceFee, health, liquidity, ownSales, demand, bands, learnedLoss, compliance, capital, verification, policy } = p;
   const buy = p.buy.match ? p.buy : { ...p.buy, match: LEGACY_MATCH };
   const blocks = [];
   const reviews = [];
@@ -137,6 +139,14 @@ export function evaluate(p) {
   for (const b of capital?.blocks ?? []) blocks.push(b);
   for (const w of capital?.warnings ?? []) warnings.push(w);
 
+  // ── 9a. политика качества источника (интервалы Уилсона по своим попыткам закупки)
+  if (policy?.enabled) {
+    if (policy.tier === 'blocked') blocks.push(`источник заблокирован политикой качества (${policy.scope}): ${policy.reasons.join('; ')}`);
+    else if (f && policy.marginBufferPct > 0 && f.netPct < policy.marginBufferPct)
+      reviews.push(`маржа ${f.netPct.toFixed(1)}% ниже буфера ${policy.marginBufferPct}% для источника «${POLICY_LABEL[policy.tier]}» (${policy.scope})`);
+    if (policy.tier === 'probation' || policy.tier === 'normal') warnings.push(`источник «${POLICY_LABEL[policy.tier]}»: лимиты ×${policy.limitFactor}${policy.reasons[0] ? ` — ${policy.reasons[0]}` : ''}`);
+  }
+
   // ── подозрительно дёшево
   if (min && S.scoring.suspiciousPct > 0 && buy.priceRub < (min * S.scoring.suspiciousPct) / 100 && buy.match?.source !== 'manual') {
     reviews.push(`закупка дешевле ${S.scoring.suspiciousPct}% от цены FunPay — скорее всего не тот товар`);
@@ -185,12 +195,17 @@ export function evaluate(p) {
   // ── 12. исполнимость (Profit Verification)
   const V = S.verification;
   const vAge = verification ? ageMin(verification.ts) : Infinity;
-  const verifiedRecently = verification?.ok && vAge <= V.executableTtlMin;
-  const stockConfirmed = (verification && (verification.stock > 0 || verification.user_confirmed_stock)) || (buy.stock > 0 && !buy.manual && srcAge <= V.executableTtlMin);
-  const priceConfirmed = verifiedRecently || (!buy.manual && srcAge <= V.executableTtlMin);
+  const vRecent = Boolean(verification) && vAge <= V.executableTtlMin;
+  // старые записи (до схемы v4) без result: ok=1 → ok, иначе failed
+  const vResult = verification ? (verification.result ?? (verification.ok ? 'ok' : 'failed')) : null;
+  const vPriceOk = verification ? Boolean(verification.price_ok ?? verification.ok) : false;
+  const srcFresh = !buy.manual && srcAge <= V.executableTtlMin;
+  const priceConfirmed = (vRecent && vPriceOk) || srcFresh;
+  const stockConfirmed = (vRecent && verification.stock !== 0 && (verification.stock > 0 || Boolean(verification.user_confirmed_stock))) || (buy.stock > 0 && srcFresh);
   if (!priceConfirmed) executionGaps.push(`цена не перепроверена за последние ${V.executableTtlMin} мин`);
   if (!stockConfirmed) executionGaps.push('наличие у источника не подтверждено');
-  if (verification && !verification.ok && vAge <= V.executableTtlMin) blocks.push(`перепроверка не прошла: ${verification.detail ?? 'котировка изменилась'}`);
+  if (vRecent && vResult === 'blocked') blocks.push('нет в наличии у источника (перепроверка)');
+  else if (vRecent && vResult === 'failed') blocks.push(`перепроверка не прошла: ${verification.detail ?? 'котировка изменилась'}`);
 
   let status = blocks.length ? STATUS.BLOCKED : reviews.length ? STATUS.REVIEW : STATUS.CANDIDATE;
   if (status === STATUS.CANDIDATE && score < S.scoring.minScore) {
@@ -201,6 +216,7 @@ export function evaluate(p) {
 
   return {
     status,
+    policy: policy ? { tier: policy.tier, limitFactor: policy.limitFactor, marginBufferPct: policy.marginBufferPct, scope: policy.scope, reasons: policy.reasons } : null,
     verification: status === STATUS.RECOMMENDED ? 'executable' : 'theoretical',
     executionGaps,
     score,

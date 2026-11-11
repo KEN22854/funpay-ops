@@ -128,6 +128,27 @@ export function Params({ sc }: { sc: ScannerState }) {
           </label>
         </Card>
       </div>
+      <Card title="Политики качества источников">
+        <p className="mb-3 text-xs text-muted">
+          Решения по границам 95% интервала Уилсона по вашим попыткам закупки и продажам. Доли — от 0 до 1 (0.85 = 85%). Множитель лимитов сужает доли капитала и сумму сделки; буфер — сколько процентных пунктов чистой
+          маржи нужно сверх нуля.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <NumberField label="Попыток до выхода из испытательного" value={s.sourcePolicy.minAttempts} onChange={(v) => set('sourcePolicy', { minAttempts: Math.max(1, Math.floor(v)) })} />
+          <NumberField label="«Надёжный»: нижняя граница от" value={s.sourcePolicy.trustedLo} onChange={(v) => set('sourcePolicy', { trustedLo: Math.min(1, v) })} hint="цены и наличия" />
+          <NumberField label="«Надёжный»: возвраты не выше" value={s.sourcePolicy.trustedProblemHi} onChange={(v) => set('sourcePolicy', { trustedProblemHi: Math.min(1, v) })} hint="верхняя граница" />
+          <NumberField label="Блок: верхняя граница ниже" value={s.sourcePolicy.blockHi} onChange={(v) => set('sourcePolicy', { blockHi: Math.min(1, v) })} hint="цены или наличия" />
+          <NumberField label="Блок: возвраты от" value={s.sourcePolicy.blockProblemLo} onChange={(v) => set('sourcePolicy', { blockProblemLo: Math.min(1, v) })} hint="нижняя граница" />
+          <NumberField label="Испытательный: лимиты ×" value={s.sourcePolicy.probationLimitFactor} onChange={(v) => set('sourcePolicy', { probationLimitFactor: Math.min(1, v) })} />
+          <NumberField label="Испытательный: буфер" suffix="п.п." value={s.sourcePolicy.probationBufferPct} onChange={(v) => set('sourcePolicy', { probationBufferPct: v })} />
+          <NumberField label="Обычный: лимиты ×" value={s.sourcePolicy.normalLimitFactor} onChange={(v) => set('sourcePolicy', { normalLimitFactor: Math.min(1, v) })} />
+          <NumberField label="Обычный: буфер" suffix="п.п." value={s.sourcePolicy.normalBufferPct} onChange={(v) => set('sourcePolicy', { normalBufferPct: v })} />
+        </div>
+        <label className="mt-3 flex items-center gap-2 text-sm text-muted">
+          <input type="checkbox" checked={s.sourcePolicy.enabled} onChange={(e) => set('sourcePolicy', { enabled: e.target.checked })} />
+          Применять политики к рекомендациям
+        </label>
+      </Card>
       {error && <Warning tone="bad">{error}</Warning>}
       <div className="flex items-center justify-end gap-3">
         {saved && <span className="text-xs text-good">Сохранено {fmtDateTime(saved)}</span>}

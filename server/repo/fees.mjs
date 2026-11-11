@@ -34,8 +34,13 @@ export function addFee({ scope, scopeKey = '', pct, fixedRub = 0, source, validF
   return one('SELECT * FROM fee_profiles WHERE id = ?', Number(r.lastInsertRowid));
 }
 
-/** действующая ставка на момент at */
-export function currentFee(scope, scopeKey = '', at = nowIso()) {
+/**
+ * Действующая ставка на момент at. knownAt — учитывать только записи, внесённые не позже этого
+ * момента (бэктест: ставку, которую внесли задним числом, в прошлом ещё никто не знал).
+ */
+export function currentFee(scope, scopeKey = '', at = nowIso(), knownAt = null) {
+  if (knownAt)
+    return one('SELECT * FROM fee_profiles WHERE scope = ? AND scope_key = ? AND valid_from <= ? AND created_at <= ? ORDER BY valid_from DESC, id DESC LIMIT 1', scope, scopeKey, at, knownAt) ?? null;
   return one('SELECT * FROM fee_profiles WHERE scope = ? AND scope_key = ? AND valid_from <= ? ORDER BY valid_from DESC, id DESC LIMIT 1', scope, scopeKey, at) ?? null;
 }
 
@@ -43,17 +48,17 @@ export function currentFee(scope, scopeKey = '', at = nowIso()) {
  * Комиссия FunPay для раздела: профиль раздела → профиль по умолчанию → настройка по умолчанию (как допущение).
  * Возвращает и происхождение, чтобы отчёт показывал, откуда цифра.
  */
-export function saleFeeFor(sectionUrl, fallbackPct, at) {
+export function saleFeeFor(sectionUrl, fallbackPct, at, knownAt = null) {
   const key = sectionKey(sectionUrl);
-  const sec = key ? currentFee('funpay_section', key, at) : null;
+  const sec = key ? currentFee('funpay_section', key, at, knownAt) : null;
   if (sec) return { pct: sec.pct, fixed: sec.fixed_rub, origin: 'section', source: sec.source, validFrom: sec.valid_from, assumed: false };
-  const def = currentFee('funpay_default', '', at);
+  const def = currentFee('funpay_default', '', at, knownAt);
   if (def) return { pct: def.pct, fixed: def.fixed_rub, origin: 'default', source: def.source, validFrom: def.valid_from, assumed: true };
   return { pct: fallbackPct, fixed: 0, origin: 'setting', source: 'настройка по умолчанию (не подтверждена)', validFrom: null, assumed: true };
 }
 
-export function sourceFeeFor(sourceId, at) {
-  const f = currentFee('source', sourceId, at);
+export function sourceFeeFor(sourceId, at, knownAt = null) {
+  const f = currentFee('source', sourceId, at, knownAt);
   return f ? { pct: f.pct, fixed: f.fixed_rub, source: f.source, assumed: false } : { pct: 0, fixed: 0, source: 'не задана — принята 0', assumed: true };
 }
 

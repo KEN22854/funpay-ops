@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import AutoDelivery from './pages/AutoDelivery';
 import Calculator from './pages/Calculator';
+import Decisions from './pages/Decisions';
 import Journal from './pages/Journal';
 import Rules from './pages/Rules';
 import Scanner from './pages/Scanner';
@@ -15,7 +16,8 @@ export default function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Route index element={<Navigate to="/calculator" replace />} />
+        <Route index element={<Navigate to="/decisions" replace />} />
+        <Route path="/decisions" element={<Decisions />} />
         <Route path="/calculator" element={<Calculator />} />
         <Route path="/scanner" element={<Scanner />} />
         <Route path="/inventory" element={<Inventory />} />
@@ -26,7 +28,7 @@ export default function App() {
         <Route path="/tools" element={<Tools />} />
         <Route path="/start" element={<Start />} />
         <Route path="/settings" element={<Settings />} />
-        <Route path="*" element={<Navigate to="/calculator" replace />} />
+        <Route path="*" element={<Navigate to="/decisions" replace />} />
       </Route>
     </Routes>
   );

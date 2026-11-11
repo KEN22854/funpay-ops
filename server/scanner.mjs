@@ -73,6 +73,10 @@ function matchSourceOffer(watch, o, dec) {
     title: o.title,
     nameExact: watch.category === 'skins' ? norm(o.title) === norm(watch.query) : undefined,
     phase: o.phase,
+    float: o.float ?? attrs.float ?? null,
+    paintSeed: o.paintSeed ?? attrs.paintSeed ?? null,
+    stickers: o.stickers ?? attrs.stickers ?? null,
+    watchName: watch.category === 'skins' ? undefined : watch.name || watch.query,
     decision: dec[o.url],
     skinsStrict: getSettings().matching.skinsStrict,
   });
@@ -185,7 +189,7 @@ export async function scanWatch(watch) {
         ...o,
         match: (() => {
           const fa = funpayAttrs(o);
-          return matchOffer(fa, watch.attrs ?? {}, { category: watch.category, side: 'funpay', title: o.desc, nameExact: isSkin ? true : undefined, decision: dec[o.url], float: fa.float });
+          return matchOffer(fa, watch.attrs ?? {}, { category: watch.category, side: 'funpay', title: o.desc, nameExact: isSkin ? true : undefined, decision: dec[o.url], float: fa.float, paintSeed: fa.paintSeed, stickers: fa.stickers, watchName: isSkin ? undefined : watch.name || watch.query });
         })(),
       }));
       const market = matched.filter((o) => o.match.status !== 'REJECTED');

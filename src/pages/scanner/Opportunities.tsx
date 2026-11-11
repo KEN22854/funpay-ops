@@ -304,7 +304,7 @@ export function Opportunities({ sc, onBuy }: { sc: ScannerState; onBuy: (o: Oppo
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={onClose}>
-      <div className="w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-lg" role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}>
         <Card
           title={title}
           right={
@@ -321,6 +321,19 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 /** Перепроверка перед закупкой: свежая котировка мимо кэша + подтверждение наличия */
+const VERIFY_TITLE: Record<VerifyResult['result'], string> = {
+  ok: 'Цена и наличие подтверждены — можно покупать',
+  incomplete: 'Цена подтверждена, наличие — нет: отметьте, что товар есть на сайте',
+  failed: 'Перепроверка не прошла: цена не подтверждена',
+  blocked: 'Нет в наличии у источника — не покупайте',
+};
+const VERIFY_TONE: Record<VerifyResult['result'], string> = {
+  ok: 'border-good/40 bg-good/10',
+  incomplete: 'border-warn/40 bg-warn/10',
+  failed: 'border-bad/40 bg-bad/10',
+  blocked: 'border-bad/40 bg-bad/10',
+};
+
 function VerifyDialog({ o, onClose, onBuy }: { o: Opportunity; onClose: () => void; onBuy: (o: Opportunity) => void }) {
   const auto = o.kind === 'watch' && !o.buy.manual;
   const [stockOk, setStockOk] = useState(false);
@@ -361,8 +374,8 @@ function VerifyDialog({ o, onClose, onBuy }: { o: Opportunity; onClose: () => vo
         </label>
         {error && <p className="text-bad">{error}</p>}
         {res && (
-          <div className={`rounded-lg border p-3 ${res.ok ? 'border-good/40 bg-good/10' : 'border-bad/40 bg-bad/10'}`}>
-            <p className="font-medium">{res.ok ? 'Котировка подтверждена' : 'Перепроверка не прошла'}</p>
+          <div className={`rounded-lg border p-3 ${VERIFY_TONE[res.result]}`}>
+            <p className="font-medium">{VERIFY_TITLE[res.result]}</p>
             <p className="text-xs">
               было {fmtRub(res.quoted)} → сейчас {res.fresh === null ? '—' : fmtRub(res.fresh)}
               {res.notes.length > 0 && ` · ${res.notes.join('; ')}`}

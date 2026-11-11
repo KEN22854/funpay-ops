@@ -5,11 +5,11 @@ import * as inv from '../repo/inventory.mjs';
 import { kaplanMeier, priceBands, sellProbability } from '../repo/demand.mjs';
 import { aging, capitalSnapshot, cashFlowForecast, checkLimits, learnedLossPct, releaseCash, reserveCash } from '../repo/risk.mjs';
 import { closeDuePaper, openPaper, paperStats } from '../repo/paper.mjs';
-import { runBacktest } from '../repo/backtest.mjs';
-import { recordAttempt, sourceQuality } from '../repo/quality.mjs';
+import { replayBacktest, runBacktest } from '../repo/backtest.mjs';
+import { recordAttempt, sourcePolicy, sourceQuality, wilson } from '../repo/quality.mjs';
 import { updateSettings, settingsHash } from '../repo/settings.mjs';
 import { results, watches } from '../repo/watches.mjs';
-import { verifyOpportunity } from '../verify.mjs';
+import { decideVerification, verifyOpportunity } from '../verify.mjs';
 import { buildOpportunities } from '../opportunities.mjs';
 
 const ago = (days) => new Date(Date.now() - days * 86400_000).toISOString();
@@ -111,6 +111,83 @@ describe('частичное исполнение закупки', () => {
   });
 });
 
+describe('политики качества источников (интервал Уилсона)', () => {
+  it('интервал Уилсона: эталонные значения и края', () => {
+    const w = wilson(8, 10);
+    expect(w.lo).toBeCloseTo(0.4902, 3);
+    expect(w.hi).toBeCloseTo(0.9433, 3);
+    expect(wilson(0, 0)).toMatchObject({ lo: 0, hi: 1, p: null });
+    expect(wilson(5, 5).hi).toBe(1);
+    expect(wilson(5, 5).lo).toBeCloseTo(0.5655, 3);
+  });
+
+  it('новый источник — испытательный срок: лимиты ×0.5 и буфер маржи', () => {
+    const p = sourcePolicy('new');
+    expect(p.tier).toBe('probation');
+    expect(p.limitFactor).toBe(0.5);
+    expect(p.marginBufferPct).toBe(5);
+  });
+
+  it('3 из 3 удачных — ещё не «надёжный»; 30 из 30 + продажи без проблем — надёжный', () => {
+    for (let i = 0; i < 3; i++) recordAttempt({ sourceId: 'a', quotedRub: 100, actualRub: 100, outcome: 'ok' });
+    expect(sourcePolicy('a').tier).toBe('probation');
+    for (let i = 0; i < 27; i++) recordAttempt({ sourceId: 'a', quotedRub: 100, actualRub: 100, outcome: 'ok' });
+    expect(sourcePolicy('a').tier).toBe('normal'); // своих продаж из источника нет — доля возвратов неизвестна
+    const p = inv.createPurchase({ item: 'X', qty: 25, unitPrice: 100, currency: 'RUB', sourceId: 'a' });
+    for (let i = 0; i < 25; i++) inv.createSale({ item: 'X', qty: 1, unitPrice: 200, saleFeePct: 0 });
+    expect(p).toBeTruthy();
+    const pol = sourcePolicy('a');
+    expect(pol.tier).toBe('trusted');
+    expect(pol.limitFactor).toBe(1);
+  });
+
+  it('товар часто отсутствует → блок источника', () => {
+    for (let i = 0; i < 8; i++) recordAttempt({ sourceId: 'b', quotedRub: 100, outcome: 'out_of_stock' });
+    recordAttempt({ sourceId: 'b', quotedRub: 100, actualRub: 100, outcome: 'ok' });
+    const p = sourcePolicy('b');
+    expect(p.tier).toBe('blocked');
+    expect(p.reasons.join()).toMatch(/в наличии 1 из 9/);
+  });
+
+  it('политика по категории: проблемы в скинах не блокируют ключи того же источника', () => {
+    const wk = watches.upsert({ name: 'K', category: 'keys', query: 'K', funpay: { url: 'https://funpay.com/lots/1/' } });
+    const ws = watches.upsert({ name: 'S', category: 'skins', query: 'S', funpay: { url: 'https://funpay.com/lots/2/' } });
+    for (let i = 0; i < 8; i++) recordAttempt({ sourceId: 'c', watchId: ws.id, quotedRub: 100, outcome: 'out_of_stock' });
+    for (let i = 0; i < 8; i++) recordAttempt({ sourceId: 'c', watchId: wk.id, quotedRub: 100, actualRub: 100, outcome: 'ok' });
+    expect(sourcePolicy('c', { category: 'skins' }).tier).toBe('blocked');
+    expect(sourcePolicy('c', { category: 'keys' }).tier).not.toBe('blocked');
+    expect(sourcePolicy('c', { category: 'keys' }).byCategory).toBe(true);
+  });
+
+  it('движок: заблокированный источник — BLOCKED; низкая маржа на испытательном сроке — REVIEW', () => {
+    const { w } = seedWatch(500, 1000);
+    for (let i = 0; i < 8; i++) recordAttempt({ sourceId: 'plati', quotedRub: 100, outcome: 'out_of_stock' });
+    const [o] = buildOpportunities();
+    expect(o.eval.status).toBe('BLOCKED');
+    expect(o.eval.blocks.join()).toMatch(/политикой качества/);
+    getDb().prepare('DELETE FROM execution_attempts').run();
+    watches.remove?.(w.id);
+  });
+
+  it('движок: маржа ниже буфера испытательного срока → REVIEW', () => {
+    seedWatch(940, 1000); // ~1 % чистыми — ниже буфера 5 %
+    const [o] = buildOpportunities();
+    expect(o.eval.policy.tier).toBe('probation');
+    if (o.eval.status !== 'BLOCKED') {
+      expect(o.eval.status).toBe('REVIEW');
+      expect(o.eval.reviews.join()).toMatch(/ниже буфера/);
+    }
+  });
+
+  it('политика выключена — не влияет', () => {
+    updateSettings({ sourcePolicy: { enabled: false } });
+    for (let i = 0; i < 8; i++) recordAttempt({ sourceId: 'plati', quotedRub: 100, outcome: 'out_of_stock' });
+    seedWatch();
+    const [o] = buildOpportunities();
+    expect(o.eval.blocks.join()).not.toMatch(/политикой качества/);
+  });
+});
+
 describe('качество источников по попыткам закупки', () => {
   it('точность цены и остатка', () => {
     recordAttempt({ sourceId: 's', quotedRub: 100, actualRub: 100, outcome: 'ok' });
@@ -164,6 +241,65 @@ describe('Profit Verification: перепроверка', () => {
     expect(r.notes.join()).toMatch(/цена выросла/);
     expect(r.opportunity.eval.status).toBe('BLOCKED');
   });
+
+  it('цена подтверждена, наличие неизвестно → incomplete, не исполнимо и не блок', async () => {
+    seedWatch();
+    const [o] = buildOpportunities();
+    const r = await verifyOpportunity(o.id, {}, async () => {});
+    expect(r).toMatchObject({ ok: false, result: 'incomplete', priceOk: true });
+    expect(r.reasons).toEqual(['stock_unknown']);
+    expect(r.opportunity.eval.status).toBe('CANDIDATE');
+    expect(r.opportunity.eval.executionGaps.join()).toMatch(/наличие/);
+  });
+
+  it('источник сообщил stock = 0 → блок, даже если человек отметил наличие', async () => {
+    const { w } = seedWatch();
+    const [o] = buildOpportunities();
+    const r = await verifyOpportunity(o.id, { userConfirmedStock: true }, async () => {
+      const res = results.get(w.id);
+      res.sources[0].offers[0] = { ...res.sources[0].offers[0], stock: 0 };
+      results.set(w.id, res);
+    });
+    expect(r).toMatchObject({ ok: false, result: 'blocked' });
+    expect(r.opportunity.eval.status).toBe('BLOCKED');
+  });
+
+  it('источник сообщил stock > 0 и цена та же → исполнимо без ручной отметки', async () => {
+    const { w } = seedWatch();
+    const [o] = buildOpportunities();
+    const r = await verifyOpportunity(o.id, {}, async () => {
+      const res = results.get(w.id);
+      res.sources[0].offers[0] = { ...res.sources[0].offers[0], stock: 4 };
+      results.set(w.id, res);
+    });
+    expect(r).toMatchObject({ ok: true, result: 'ok' });
+    expect(r.opportunity.eval.status).toBe('RECOMMENDED');
+  });
+});
+
+describe('decideVerification: таблица исходов из аудита', () => {
+  const base = { quoted: 100, tolerancePct: 2 };
+  it.each([
+    ['цена ок + stock > 0', { fresh: 100, stock: 3 }, 'ok'],
+    ['цена ок + человек подтвердил', { fresh: 101, stock: null, userConfirmedStock: true }, 'ok'],
+    ['цена ок + наличие неизвестно', { fresh: 100, stock: null }, 'incomplete'],
+    ['цена не получена + наличие подтверждено', { fresh: null, stock: 5 }, 'failed'],
+    ['цена не получена + человек подтвердил', { fresh: null, stock: null, userConfirmedStock: true }, 'failed'],
+    ['цена выше допуска + stock > 0', { fresh: 103, stock: 5 }, 'failed'],
+    ['цена выше допуска + человек подтвердил', { fresh: 150, stock: null, userConfirmedStock: true }, 'failed'],
+    ['цена ок + stock = 0', { fresh: 100, stock: 0 }, 'blocked'],
+    ['цена ок + stock = 0 + человек «подтвердил»', { fresh: 100, stock: 0, userConfirmedStock: true }, 'blocked'],
+    ['цена выше + stock = 0', { fresh: 200, stock: 0 }, 'blocked'],
+  ])('%s → %s', (_name, input, expected) => {
+    expect(decideVerification({ ...base, ...input }).result).toBe(expected);
+  });
+  it('граница допуска включительно', () => {
+    expect(decideVerification({ ...base, fresh: 102, stock: 1 }).result).toBe('ok');
+    expect(decideVerification({ ...base, fresh: 102.01, stock: 1 }).result).toBe('failed');
+  });
+  it('мусор вместо цены не считается подтверждением', () => {
+    for (const fresh of [NaN, 0, -5, Infinity]) expect(decideVerification({ ...base, fresh, stock: 1 }).priceOk).toBe(false);
+  });
 });
 
 describe('журнал рекомендаций и paper trading', () => {
@@ -171,7 +307,7 @@ describe('журнал рекомендаций и paper trading', () => {
     seedWatch();
     buildOpportunities({ log: true });
     const rec = getDb().prepare('SELECT * FROM recommendations').get();
-    expect(rec).toMatchObject({ status: 'CANDIDATE', engine_version: '2.1.0', settings_hash: settingsHash() });
+    expect(rec).toMatchObject({ status: 'CANDIDATE', engine_version: '2.2.0', settings_hash: settingsHash() });
     const paper = getDb().prepare('SELECT strategy FROM paper_positions ORDER BY strategy').all().map((r) => r.strategy);
     expect(paper).toEqual(['balanced', 'fast', 'max']);
     // повторный проход не дублирует открытые позиции
@@ -204,12 +340,83 @@ describe('бэктест без заглядывания в будущее', () 
     snap(ago(10), 'funpay', 'funpay', 1000);
     snap(ago(5), 'funpay', 'funpay', 1000);
     snap(ago(2.9), 'funpay', 'funpay', 520);
-    const r = runBacktest({ horizonDays: 7, sinceDays: 30, save: false });
+    const r = runBacktest({ horizonDays: 7, sinceDays: 30, save: false, simulation: 'proxy' });
     const fast = r.strategies.fast;
     expect(fast.trades).toBe(1);
     expect(fast.winRate).toBe(0);
     expect(fast.falsePositiveRate).toBe(1);
     expect(fast.forecastMae).toBeGreaterThan(0);
     expect(r.trades[0].exitPrice).toBe(519); // 520 − 1 ₽ подрезки
+  });
+});
+
+describe('бэктест: исторические параметры и реалистичная симуляция', () => {
+  /** товар: источник 500, FunPay держится 1000 четыре дня, потом падает до 520 */
+  function seedHistory() {
+    const w = watches.upsert({ name: 'H', category: 'keys', query: 'H', funpay: { url: 'https://funpay.com/lots/3/' } });
+    const snap = (ts, kind, src, min, stock = null) =>
+      run('INSERT INTO price_snapshots(watch_id, kind, source_id, ts, min_rub, median_rub, trimmed_rub, count, stock) VALUES (?, ?, ?, ?, ?, ?, ?, 5, ?)', w.id, kind, src, ts, min, min * 1.1, min * 1.05, stock);
+    snap(ago(10), 'source', 'plati', 500);
+    snap(ago(10), 'funpay', 'funpay', 1000);
+    snap(ago(8), 'funpay', 'funpay', 1000);
+    snap(ago(6), 'funpay', 'funpay', 520);
+    snap(ago(2.9), 'funpay', 'funpay', 520);
+    return { w, snap };
+  }
+
+  it('поздние изменения настроек не меняют исторический прогон; в режиме current — меняют', () => {
+    seedHistory();
+    const before = runBacktest({ horizonDays: 7, sinceDays: 30 });
+    updateSettings({ costModel: { defaultSaleFeePct: 40 } }); // изменили сегодня
+    const hist = runBacktest({ horizonDays: 7, sinceDays: 30, save: false });
+    expect(hist.strategies).toEqual(before.strategies);
+    const cur = runBacktest({ horizonDays: 7, sinceDays: 30, save: false, mode: 'current' });
+    expect(cur.strategies.fast.trades).toBeLessThan(before.strategies.fast.trades + 1);
+    expect(JSON.stringify(cur.strategies)).not.toBe(JSON.stringify(before.strategies));
+  });
+
+  it('сохранённый прогон воспроизводится с тем же отпечатком входных данных', async () => {
+    seedHistory();
+    const r = runBacktest({ horizonDays: 7, sinceDays: 30 });
+    expect(r.inputFingerprint).toMatch(/^[0-9a-f]{16}$/);
+    const id = getDb().prepare('SELECT max(id) id FROM backtest_runs').get().id;
+    // после прогона: новые снимки, новая комиссия, новые настройки — повтор на asOf их не видит
+    await new Promise((res) => setTimeout(res, 5));
+    updateSettings({ pricing: { undercutRub: 50 } });
+    run("INSERT INTO price_snapshots(watch_id, kind, source_id, ts, min_rub) VALUES ((SELECT id FROM watches LIMIT 1), 'funpay', 'funpay', ?, 2000)", nowIso());
+    const rep = replayBacktest(id);
+    expect(rep.reproducible).toBe(true);
+  });
+
+  it('реалистичная симуляция: вероятность продажи только пока цена конкурентна, задержка поставки', () => {
+    seedHistory();
+    const r = runBacktest({ horizonDays: 7, sinceDays: 30, save: false, deliveryDelayH: 0 });
+    const t = r.trades.find((x) => x.strategy === 'fast');
+    // конкурентны 4 дня из 7 (с 10-го по 6-й день назад), средний срок продажи 3 дня → p = 1 − e^(−4/3)
+    expect(t.competitiveDays).toBeCloseTo(4, 6);
+    expect(t.fillProbability).toBeCloseTo(1 - Math.exp(-4 / 3), 6);
+    expect(t.net).toBeLessThan(t.forecastNet);
+    // поставка через 4 дня — продать уже не успеваем, остаётся только выход по рынку
+    const late = runBacktest({ horizonDays: 7, sinceDays: 30, save: false, deliveryDelayH: 96 }).trades.find((x) => x.strategy === 'fast');
+    expect(late.fillProbability).toBe(0);
+    expect(late.net).toBeLessThan(0);
+    expect(r.breakdown.fast.byRegime).toBeTruthy();
+    expect(r.breakdown.fast.byCategory.keys.trades).toBe(1);
+  });
+
+  it('бюджет и одновременные позиции ограничивают входы; нулевой остаток — не вход', () => {
+    const { snap } = seedHistory();
+    snap(ago(10), 'source', 'steam', 510);
+    const all3 = runBacktest({ horizonDays: 7, sinceDays: 30, save: false });
+    expect(all3.strategies.fast.trades).toBe(2);
+    const one1 = runBacktest({ horizonDays: 7, sinceDays: 30, save: false, maxConcurrent: 1 });
+    expect(one1.strategies.fast.trades).toBe(1);
+    expect(one1.skippedConcurrency.fast).toBe(1);
+    const poor = runBacktest({ horizonDays: 7, sinceDays: 30, save: false, budgetRub: 600 });
+    expect(poor.strategies.fast.trades).toBe(1);
+    expect(poor.skippedBudget.fast).toBe(1);
+    snap(ago(10.001), 'source', 'gg', 400, 0);
+    const oos = runBacktest({ horizonDays: 7, sinceDays: 30, save: false });
+    expect(oos.skippedOutOfStock).toBeGreaterThan(0);
   });
 });

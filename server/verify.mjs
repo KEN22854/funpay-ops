@@ -42,14 +42,15 @@ export async function verifyOpportunity(id, input, rescan) {
   if (fresh === null && !notes.length) notes.push(autoRefetch ? 'не удалось получить свежую котировку' : 'для этого источника введите цену, которую видите на сайте сейчас');
 
   const tol = S.verification.priceTolerancePct;
-  const priceOk = fresh !== null && fresh <= quoted * (1 + tol / 100);
-  if (fresh !== null && !priceOk) notes.push(`цена выросла: ${quoted.toFixed(2)} → ${fresh.toFixed(2)} ₽ (допуск ${tol}%)`);
-  if (stock === 0) notes.push('нет в наличии');
   const userStock = Boolean(input.userConfirmedStock);
-  const ok = priceOk && stock !== 0;
+  const { result, priceOk, reasons } = decideVerification({ quoted, fresh, stock, userConfirmedStock: userStock, tolerancePct: tol });
+  if (reasons.includes('price_rose')) notes.push(`цена выросла: ${quoted.toFixed(2)} → ${fresh.toFixed(2)} ₽ (допуск ${tol}%)`);
+  if (reasons.includes('out_of_stock')) notes.push('нет в наличии у источника');
+  if (reasons.includes('stock_unknown')) notes.push('наличие не подтверждено: источник не сообщает остаток — подтвердите вручную');
+  const ok = result === 'ok';
 
   run(
-    'INSERT INTO verifications(opp_id, watch_id, source_id, offer_url, ts, quoted_rub, fresh_rub, stock, user_confirmed_stock, ok, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO verifications(opp_id, watch_id, source_id, offer_url, ts, quoted_rub, fresh_rub, stock, user_confirmed_stock, ok, detail, result, price_ok, reasons) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     id,
     before.watchId ?? null,
     before.buy.sourceId,
@@ -61,8 +62,36 @@ export async function verifyOpportunity(id, input, rescan) {
     userStock ? 1 : 0,
     ok ? 1 : 0,
     notes.join('; ') || null,
+    result,
+    priceOk ? 1 : 0,
+    JSON.stringify(reasons),
   );
-  audit('opportunity.verify', 'opportunity', id, { ok, quoted, fresh, stock, userStock });
+  audit('opportunity.verify', 'opportunity', id, { ok, result, reasons, quoted, fresh, stock, userStock });
   const final = buildOpportunities({ only: id })[0] ?? null;
-  return { ok, quoted, fresh, stock, userConfirmedStock: userStock, notes, opportunity: final };
+  return { ok, result, reasons, priceOk, quoted, fresh, stock, userConfirmedStock: userStock, notes, opportunity: final };
+}
+
+/**
+ * Решение перепроверки (чистая функция, таблица из аудита 2026-11-12):
+ * | цена                | наличие                          | исход      |
+ * | подтверждена        | stock > 0 или подтвердил человек | ok         |
+ * | подтверждена        | неизвестно                       | incomplete |
+ * | не получена         | любое                            | failed     |
+ * | выше допуска        | любое                            | failed     |
+ * | любая               | stock = 0                        | blocked    |
+ * Успех — только цена И наличие. stock = 0 от источника важнее отметки человека.
+ * @returns {{ result: 'ok'|'incomplete'|'failed'|'blocked', priceOk: boolean, stockOk: boolean, reasons: string[] }}
+ */
+export function decideVerification({ quoted, fresh, stock, userConfirmedStock, tolerancePct }) {
+  const reasons = [];
+  const priceKnown = fresh !== null && fresh !== undefined && Number.isFinite(fresh) && fresh > 0;
+  const priceOk = priceKnown && fresh <= quoted * (1 + tolerancePct / 100);
+  if (!priceKnown) reasons.push('price_unknown');
+  else if (!priceOk) reasons.push('price_rose');
+  const outOfStock = stock === 0;
+  const stockOk = !outOfStock && ((typeof stock === 'number' && stock > 0) || Boolean(userConfirmedStock));
+  if (outOfStock) reasons.push('out_of_stock');
+  else if (!stockOk) reasons.push('stock_unknown');
+  const result = outOfStock ? 'blocked' : !priceOk ? 'failed' : !stockOk ? 'incomplete' : 'ok';
+  return { result, priceOk, stockOk, reasons };
 }

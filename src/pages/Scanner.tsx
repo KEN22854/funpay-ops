@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Card, NumberField, Page, Warning } from '../components/ui';
 import { api, type Mode, type Opportunity } from '../lib/api';
 import { fmtRub } from '../lib/format';
@@ -33,7 +34,12 @@ const readTab = (): Tab => {
 
 export default function Scanner() {
   const sc = useScanner();
-  const [tab, setTabState] = useState<Tab>(readTab);
+  const [params] = useSearchParams();
+  const fromUrl = params.get('tab');
+  const [tab, setTabState] = useState<Tab>(() => (TABS.some((x) => x.id === fromUrl) ? (fromUrl as Tab) : readTab()));
+  useEffect(() => {
+    if (TABS.some((x) => x.id === fromUrl)) setTabState(fromUrl as Tab);
+  }, [fromUrl]);
   const [buying, setBuying] = useState<Opportunity | null>(null);
   const setTab = (t: Tab) => {
     setTabState(t);
@@ -127,7 +133,7 @@ function BuyDialog({ o, onClose }: { o: Opportunity; onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={onClose}>
-      <div className="w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-lg" role="dialog" aria-modal="true" aria-label={`Купил: ${o.name}`} onClick={(e) => e.stopPropagation()}>
         <Card title={`Купил: ${o.name}`} right={<button className="text-muted hover:text-fg" onClick={onClose}>✕</button>}>
           {done ? (
             <div className="space-y-3">

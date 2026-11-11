@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Badge, Card, Empty, NumberField, Page, Stat, Warning } from '../components/ui';
-import { api, type Mode, type StrategyStats } from '../lib/api';
+import { api, type BacktestParams, type Mode, type PolicyTier, type StrategyStats, type WilsonBound } from '../lib/api';
 import { fmtDateTime, fmtPct, fmtRub } from '../lib/format';
 
 const TABS = [
@@ -18,7 +19,13 @@ const STRAT: Record<string, string> = { fast: 'Быстрый оборот', bal
 
 /** Обратная связь от реальных сделок: качество сигналов, капитал, спрос, стратегии. */
 export default function Quality() {
-  const [tab, setTab] = useState<Tab>('metrics');
+  const [params] = useSearchParams();
+  const fromUrl = params.get('tab');
+  const valid = (t: string | null): t is Tab => TABS.some((x) => x.id === t);
+  const [tab, setTab] = useState<Tab>(valid(fromUrl) ? fromUrl : 'metrics');
+  useEffect(() => {
+    if (valid(fromUrl)) setTab(fromUrl);
+  }, [fromUrl]);
   return (
     <Page title="Качество и риск" subtitle="Насколько рекомендации подтверждаются фактом, где работает капитал, как быстро продаётся товар и какая стратегия цены лучше — по вашим данным, а не по впечатлению.">
       <div className="flex flex-wrap gap-1 rounded-lg border border-line bg-surface p-1 text-sm">
@@ -426,10 +433,65 @@ function Paper() {
   );
 }
 
+type BtResult = Awaited<ReturnType<typeof api.backtest>>;
+type Group = Record<string, { trades: number; net: number; invested: number; roiPct: number | null; winRate: number | null }>;
+
+const BREAKDOWN: { key: 'byItem' | 'bySource' | 'byCategory' | 'byRegime'; label: string }[] = [
+  { key: 'byItem', label: 'Товар' },
+  { key: 'bySource', label: 'Источник' },
+  { key: 'byCategory', label: 'Категория' },
+  { key: 'byRegime', label: 'Режим рынка' },
+];
+
+function GroupTable({ g }: { g: Group }) {
+  const rows = Object.entries(g).sort((a, b) => b[1].net - a[1].net);
+  if (!rows.length) return <Empty>Нет сделок.</Empty>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Группа</th>
+            <th className="text-right">Сделок</th>
+            <th className="text-right">Чистыми</th>
+            <th className="text-right">ROI</th>
+            <th className="text-right">Win rate</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([k, v]) => (
+            <tr key={k}>
+              <td>{k}</td>
+              <td className="num text-right">{v.trades}</td>
+              <td className={`num text-right ${v.net >= 0 ? 'text-good' : 'text-bad'}`}>{fmtRub(v.net)}</td>
+              <td className="num text-right">{v.roiPct === null ? '—' : `${v.roiPct.toFixed(1)}%`}</td>
+              <td className="num text-right">{pct(v.winRate)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Backtest() {
-  const [f, setF] = useState({ horizonDays: 7, minNet: 50, minRoiPct: 5, sinceDays: 90 });
+  const [f, setF] = useState<BacktestParams>({
+    horizonDays: 7,
+    minNet: 50,
+    minRoiPct: 5,
+    sinceDays: 90,
+    mode: 'historical',
+    simulation: 'realistic',
+    budgetRub: 0,
+    maxConcurrent: 0,
+    deliveryDelayH: 1,
+    refundPct: 0,
+  });
   const [busy, setBusy] = useState(false);
-  const [res, setRes] = useState<Awaited<ReturnType<typeof api.backtest>> | null>(null);
+  const [res, setRes] = useState<BtResult | null>(null);
+  const [strat, setStrat] = useState<'fast' | 'balanced' | 'max'>('fast');
+  const [dim, setDim] = useState<(typeof BREAKDOWN)[number]['key']>('bySource');
+  const [replay, setReplay] = useState<{ id: number; ok: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { data: runs, load } = useLoad(() => api.backtestRuns());
   const run = async () => {
@@ -444,18 +506,47 @@ function Backtest() {
       setBusy(false);
     }
   };
+  const doReplay = async (id: number) => {
+    setError(null);
+    try {
+      const r = await api.backtestReplay(id);
+      setReplay({ id, ok: r.reproducible });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
   return (
     <div className="space-y-4">
       <Card title="Параметры">
         <div className="grid gap-3 sm:grid-cols-4">
-          <NumberField label="Горизонт выхода" suffix="дн." value={f.horizonDays} onChange={(v) => setF({ ...f, horizonDays: Math.max(1, v) })} />
+          <NumberField label="Горизонт" suffix="дн." value={f.horizonDays} onChange={(v) => setF({ ...f, horizonDays: Math.max(1, v) })} />
           <NumberField label="Вход от (чистыми)" suffix="₽" value={f.minNet} onChange={(v) => setF({ ...f, minNet: v })} />
           <NumberField label="Вход от ROI" suffix="%" value={f.minRoiPct} onChange={(v) => setF({ ...f, minRoiPct: v })} />
           <NumberField label="Глубина истории" suffix="дн." value={f.sinceDays} onChange={(v) => setF({ ...f, sinceDays: Math.max(1, v) })} />
+          <NumberField label="Бюджет (0 — без лимита)" suffix="₽" value={f.budgetRub} onChange={(v) => setF({ ...f, budgetRub: Math.max(0, v) })} />
+          <NumberField label="Позиций одновременно (0 — без лимита)" value={f.maxConcurrent} onChange={(v) => setF({ ...f, maxConcurrent: Math.max(0, Math.round(v)) })} />
+          <NumberField label="Задержка поставки" suffix="ч" value={f.deliveryDelayH} onChange={(v) => setF({ ...f, deliveryDelayH: Math.max(0, v) })} />
+          <NumberField label="Возвраты сверх параметров" suffix="%" value={f.refundPct} onChange={(v) => setF({ ...f, refundPct: Math.max(0, v) })} />
+        </div>
+        <div className="mt-3 flex flex-wrap gap-4 text-sm">
+          <label className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+            Параметры:
+            <select className="input w-auto min-w-0 max-w-full" value={f.mode} onChange={(e) => setF({ ...f, mode: e.target.value as BacktestParams['mode'] })}>
+              <option value="historical">исторические (как было на момент решения)</option>
+              <option value="current">текущие (что было бы с сегодняшними)</option>
+            </select>
+          </label>
+          <label className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+            Симуляция:
+            <select className="input w-auto min-w-0 max-w-full" value={f.simulation} onChange={(e) => setF({ ...f, simulation: e.target.value as BacktestParams['simulation'] })}>
+              <option value="realistic">реалистичная</option>
+              <option value="proxy">прокси (выход по рынку через горизонт)</option>
+            </select>
+          </label>
         </div>
         <p className="mt-2 text-xs text-muted">
-          В момент t решение принимается только по снимкам до t и по ставке комиссии, действовавшей тогда. Выход — по минимальной цене FunPay через горизонт (прокси, не подтверждённая продажа). Используются текущие
-          параметры модели; версия движка и отпечаток параметров сохраняются с прогоном.
+          В момент t решение принимается только по снимкам до t, по комиссии и параметрам, известным тогда. «Реалистичная» симуляция учитывает задержку поставки, вероятность продажи (только пока ваша цена не выше рынка),
+          бюджет, число позиций и возвраты; непроданное в конце горизонта уходит по рынку. Результат — ожидаемое значение модели, а не факт продаж. Каждый прогон сохраняет отпечаток входных данных и воспроизводится.
         </p>
         {error && <p className="mt-2 text-sm text-bad">{error}</p>}
         <div className="mt-3 flex justify-end">
@@ -465,13 +556,36 @@ function Backtest() {
         </div>
       </Card>
       {res && (
-        <Card title={`Результат · движок ${res.engineVersion} · параметры ${res.settingsHash}`}>
+        <Card title={`Результат · движок ${res.engineVersion} · ${res.params.mode === 'historical' ? 'исторические параметры' : `параметры ${res.settingsHash}`} · данные ${res.inputFingerprint}`}>
           {Object.values(res.strategies).every((s) => !s.trades) ? (
             <Empty>Сделок не найдено: мало истории снимков или пороги входа слишком высокие. История копится с каждым сканом.</Empty>
           ) : (
-            <StrategyTable stats={res.strategies} />
+            <>
+              <StrategyTable stats={res.strategies} />
+              <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-muted">Разбивка:</span>
+                <select className="input w-auto" value={strat} onChange={(e) => setStrat(e.target.value as typeof strat)}>
+                  {(['fast', 'balanced', 'max'] as const).map((s) => (
+                    <option key={s} value={s}>
+                      {STRAT[s]}
+                    </option>
+                  ))}
+                </select>
+                {BREAKDOWN.map((b) => (
+                  <button key={b.key} className={dim === b.key ? 'btn-primary' : 'btn-ghost'} onClick={() => setDim(b.key)}>
+                    {b.label}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2">
+                <GroupTable g={res.breakdown[strat][dim]} />
+              </div>
+            </>
           )}
-          {res.skippedNoExit > 0 && <p className="mt-2 text-xs text-muted">Входов без данных для выхода (ещё не прошёл горизонт): {res.skippedNoExit}</p>}
+          <p className="mt-2 text-xs text-muted">
+            Пропущено: без данных для выхода {res.skippedNoExit} · устаревшая котировка {res.skippedStale} · нет в наличии {res.skippedOutOfStock} · не хватило бюджета {res.skippedBudget[strat] ?? 0} · лимит позиций{' '}
+            {res.skippedConcurrency[strat] ?? 0}
+          </p>
         </Card>
       )}
       {runs && runs.length > 0 && (
@@ -481,11 +595,12 @@ function Backtest() {
               <thead>
                 <tr>
                   <th>Когда</th>
-                  <th>Версия</th>
+                  <th>Версия / данные</th>
                   <th>Параметры</th>
-                  <th className="text-right">Быстрый: чистыми</th>
-                  <th className="text-right">Сбаланс.: чистыми</th>
-                  <th className="text-right">Макс.: чистыми</th>
+                  <th className="text-right">Быстрый</th>
+                  <th className="text-right">Сбаланс.</th>
+                  <th className="text-right">Макс.</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -493,16 +608,23 @@ function Backtest() {
                   <tr key={r.id}>
                     <td className="num whitespace-nowrap text-xs text-muted">{fmtDateTime(r.ts)}</td>
                     <td className="num text-xs">
-                      {r.engine_version} / {r.settings_hash}
+                      {r.engine_version} / {r.input_fingerprint ?? r.settings_hash}
                     </td>
                     <td className="text-xs text-muted">
-                      {r.params.horizonDays} дн., от {r.params.minNet} ₽, ROI {r.params.minRoiPct}%
+                      {r.params.horizonDays} дн., от {r.params.minNet} ₽, ROI {r.params.minRoiPct}% · {!r.params.mode ? 'до 2.2: текущие, прокси' : `${r.params.mode === 'current' ? 'текущие' : 'исторические'} · ${r.params.simulation === 'proxy' ? 'прокси' : 'реалист.'}`}
                     </td>
                     {['fast', 'balanced', 'max'].map((k) => (
                       <td key={k} className="num text-right">
                         {fmtRub(r.result.strategies[k]?.netProfit ?? 0)} <span className="text-xs text-muted">({r.result.strategies[k]?.trades ?? 0})</span>
                       </td>
                     ))}
+                    <td className="whitespace-nowrap text-right">
+                      {r.input_fingerprint && (
+                        <button className="btn-ghost text-xs" onClick={() => doReplay(r.id)} title="Повторить прогон на тех же данных и проверить, что результат совпал">
+                          {replay?.id === r.id ? (replay.ok ? '✓ совпало' : '✕ отличается') : 'повторить'}
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -514,49 +636,100 @@ function Backtest() {
   );
 }
 
+const TIER: Record<PolicyTier, { label: string; tone: 'good' | 'warn' | 'bad' | 'muted' }> = {
+  trusted: { label: 'надёжный', tone: 'good' },
+  normal: { label: 'обычный', tone: 'muted' },
+  probation: { label: 'испытательный', tone: 'warn' },
+  blocked: { label: 'заблокирован', tone: 'bad' },
+};
+
+/** доля с 95% интервалом Уилсона */
+function Ci({ w }: { w: WilsonBound }) {
+  if (!w.n) return <span className="text-muted">—</span>;
+  return (
+    <span title={`${w.k} из ${w.n}; 95% интервал Уилсона`}>
+      {pct(w.p)}{' '}
+      <span className="text-xs text-muted">
+        ({pct(w.lo)}–{pct(w.hi)}, n={w.n})
+      </span>
+    </span>
+  );
+}
+
 function SourcesQuality() {
   const { data: q, error } = useLoad(() => api.qualitySources());
+  const [onlyActive, setOnlyActive] = useState(true);
   if (error) return <Warning tone="bad">{error}</Warning>;
   if (!q) return null;
-  const rows = Object.values(q);
+  const all = Object.values(q).sort((a, b) => ['blocked', 'probation', 'normal', 'trusted'].indexOf(a.policy.tier) - ['blocked', 'probation', 'normal', 'trusted'].indexOf(b.policy.tier) || b.data.checked - a.data.checked);
+  const rows = onlyActive ? all.filter((s) => s.data.checked > 0 || s.policy.bounds.stock.n > 0 || s.policy.bounds.price.n > 0) : all;
+  const count = (t: PolicyTier) => all.filter((s) => s.policy.tier === t).length;
   return (
-    <Card title="Качество источников — не только «отвечает ли сайт»">
-      <p className="mb-3 text-xs text-muted">
-        Данные — полнота и правдоподобие котировок при сканах. Цена и остаток — по вашим попыткам закупки (кнопки «купил» и «не вышло»). Исполнение — возвраты и споры по товару из этого источника. Пустые
-        значения — данных ещё нет.
-      </p>
-      <div className="overflow-x-auto">
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Источник</th>
-              <th className="text-right">Данные без проблем</th>
-              <th className="text-right">Точность цены</th>
-              <th className="text-right">Было в наличии</th>
-              <th className="text-right">Возвраты/споры</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((s) => (
-              <tr key={s.sourceId}>
-                <td>{s.sourceId}</td>
-                <td className="num text-right">
-                  {pct(s.data.okShare)} <span className="text-xs text-muted">({s.data.checked})</span>
-                </td>
-                <td className="num text-right">
-                  {s.price.medianDeviationPct === null ? '—' : `±${s.price.medianDeviationPct.toFixed(1)}%`} <span className="text-xs text-muted">({s.price.attempts})</span>
-                </td>
-                <td className="num text-right">
-                  {pct(s.stock.accuracy)} <span className="text-xs text-muted">({s.stock.attempts})</span>
-                </td>
-                <td className="num text-right">
-                  {pct(s.fulfillment.problemRate)} <span className="text-xs text-muted">({s.fulfillment.sales})</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </Card>
+    <div className="space-y-4">
+      <Card title="Политики качества">
+        <p className="text-sm text-muted">
+          Уровень доверия считается по <b>границам 95% интервала Уилсона</b>, а не по средней: 3 удачные закупки из 3 ещё не доказывают надёжность. Испытательный срок и «обычный» уровень сужают лимиты доли капитала и
+          суммы сделки и требуют запас маржи; «заблокирован» — связки не рекомендуются. Если по категории товара данных достаточно, решение принимается отдельно по категории. Пороги — в «Параметрах».
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2 text-sm">
+          {(['trusted', 'normal', 'probation', 'blocked'] as const).map((t) => (
+            <Badge key={t} tone={TIER[t].tone}>
+              {TIER[t].label}: {count(t)}
+            </Badge>
+          ))}
+        </div>
+      </Card>
+      <Card title="Источники">
+        <label className="mb-3 flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={onlyActive} onChange={(e) => setOnlyActive(e.target.checked)} />
+          только источники с данными
+        </label>
+        {rows.length === 0 ? (
+          <Empty>Данных ещё нет: они копятся при сканах и по вашим кнопкам «купил» / «не вышло».</Empty>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Источник</th>
+                  <th>Уровень</th>
+                  <th className="text-right">Данные без проблем</th>
+                  <th className="text-right">Цена в допуске</th>
+                  <th className="text-right">Было в наличии</th>
+                  <th className="text-right">Возвраты/споры</th>
+                  <th className="text-right">Лимиты / буфер</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((s) => (
+                  <tr key={s.sourceId}>
+                    <td>{s.sourceId}</td>
+                    <td title={s.policy.reasons.join('\n')}>
+                      <Badge tone={TIER[s.policy.tier].tone}>{TIER[s.policy.tier].label}</Badge>
+                      {s.policy.reasons[0] && <div className="mt-1 max-w-xs text-xs text-muted">{s.policy.reasons[0]}</div>}
+                    </td>
+                    <td className="num text-right">
+                      {pct(s.data.okShare)} <span className="text-xs text-muted">({s.data.checked})</span>
+                    </td>
+                    <td className="num text-right">
+                      <Ci w={s.policy.bounds.price} />
+                    </td>
+                    <td className="num text-right">
+                      <Ci w={s.policy.bounds.stock} />
+                    </td>
+                    <td className="num text-right">
+                      <Ci w={s.policy.bounds.problems} />
+                    </td>
+                    <td className="num text-right text-xs">
+                      {s.policy.tier === 'blocked' ? '—' : `×${s.policy.limitFactor} / +${s.policy.marginBufferPct}%`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
   );
 }

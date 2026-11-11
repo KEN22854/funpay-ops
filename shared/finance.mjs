@@ -6,7 +6,7 @@
 //
 // Все суммы — в рублях за 1 единицу. Внутри нет округлений: округляет только интерфейс.
 
-export const ENGINE_VERSION = '2.1.0';
+export const ENGINE_VERSION = '2.2.0';
 const MAX_PRICE = 1e8;
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : 0);

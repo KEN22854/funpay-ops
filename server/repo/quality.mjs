@@ -7,6 +7,7 @@
 import { all, nowIso, one, run } from '../db/db.mjs';
 import { median, trimmedMedian } from './history.mjs';
 import { audit } from './audit.mjs';
+import { getSettings } from './settings.mjs';
 
 const KNOWN_CURRENCIES = new Set(['RUB', 'USD', 'EUR', 'KZT', 'UAH', 'TRY', 'CNY', 'BYN', 'GBP']);
 
@@ -88,4 +89,93 @@ export function sourceQuality(sourceId, days = 30) {
     fulfillment: { sales: sales.length, problemRate: sales.length ? problem / sales.length : null },
     note: 'точность цены и остатка считается по вашим попыткам закупки — отмечайте результат кнопкой «купил / не получилось»',
   };
+}
+
+/**
+ * 95% интервал Уилсона для доли k из n. При n = 0 — полная неопределённость [0, 1].
+ * @returns {{ k: number, n: number, p: number|null, lo: number, hi: number }}
+ */
+export function wilson(k, n, z = 1.96) {
+  if (!n) return { k: 0, n: 0, p: null, lo: 0, hi: 1 };
+  const p = k / n;
+  const z2 = z * z;
+  const d = 1 + z2 / n;
+  const c = (p + z2 / (2 * n)) / d;
+  const h = (z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / d;
+  return { k, n, p, lo: Math.max(0, c - h), hi: Math.min(1, c + h) };
+}
+
+/** счётчики исполнения по источнику (и категории товара, если задана) */
+function executionCounts(sourceId, { category, days = 90, tolerancePct }) {
+  const since = new Date(Date.now() - days * 86400_000).toISOString();
+  const catSql = category ? " AND json_extract(w.data, '$.category') = ?" : '';
+  const args = category ? [sourceId, since, category] : [sourceId, since];
+  const attempts = all(
+    `SELECT a.outcome, a.quoted_rub, a.actual_rub FROM execution_attempts a LEFT JOIN watches w ON w.id = a.watch_id
+      WHERE a.source_id = ? AND a.ts >= ?${catSql}`,
+    ...args,
+  );
+  const stockKnown = attempts.filter((a) => a.outcome !== 'failed');
+  const available = stockKnown.filter((a) => !['out_of_stock', 'not_found'].includes(a.outcome)).length;
+  const priced = attempts.filter((a) => a.quoted_rub > 0 && a.actual_rub > 0);
+  const within = priced.filter((a) => a.actual_rub <= a.quoted_rub * (1 + tolerancePct / 100)).length;
+  const sales = all(
+    `SELECT DISTINCT s.id, s.status, s.disputed FROM sales s
+       JOIN stock_movements m ON m.sale_id = s.id JOIN purchases p ON p.id = m.purchase_id
+      WHERE p.source_id = ? AND s.sold_at >= ? AND s.mode = 'real' AND s.status != 'cancelled'${category ? ' AND coalesce(p.category, \'\') = ?' : ''}`,
+    ...args,
+  );
+  const problems = sales.filter((s) => s.disputed || ['refunded', 'partial_refund'].includes(s.status)).length;
+  return { stock: wilson(available, stockKnown.length), price: wilson(within, priced.length), problems: wilson(problems, sales.length) };
+}
+
+export const POLICY_TIERS = ['trusted', 'normal', 'probation', 'blocked'];
+
+/**
+ * Политика источника: уровень доверия, множитель лимитов, буфер маржи и причины.
+ * Если по категории товара достаточно попыток — решение по категории, иначе по источнику в целом.
+ * @returns {{ tier: 'trusted'|'normal'|'probation'|'blocked', limitFactor: number, marginBufferPct: number, reasons: string[], scope: string, bounds: object, enabled: boolean }}
+ */
+export function sourcePolicy(sourceId, { category } = {}, S = getSettings()) {
+  const P = S.sourcePolicy;
+  const tol = S.verification.priceTolerancePct;
+  const all_ = executionCounts(sourceId, { tolerancePct: tol });
+  const cat = category ? executionCounts(sourceId, { category, tolerancePct: tol }) : null;
+  const useCat = cat && Math.max(cat.stock.n, cat.price.n) >= P.minAttempts;
+  const c = useCat ? cat : all_;
+  const scope = useCat ? `${sourceId} · ${category}` : sourceId;
+  const reasons = [];
+  const pc = (x) => `${Math.round(x * 100)}%`;
+  const n = Math.max(c.stock.n, c.price.n);
+  const enough = (w) => w.n >= P.minAttempts;
+  let tier;
+  if (enough(c.stock) && c.stock.hi < P.blockHi) {
+    tier = 'blocked';
+    reasons.push(`товар был в наличии ${c.stock.k} из ${c.stock.n} раз (даже оптимистично не выше ${pc(c.stock.hi)})`);
+  }
+  if (enough(c.price) && c.price.hi < P.blockHi) {
+    tier = 'blocked';
+    reasons.push(`цена совпала с котировкой ${c.price.k} из ${c.price.n} раз (не выше ${pc(c.price.hi)})`);
+  }
+  if (enough(c.problems) && c.problems.lo > P.blockProblemLo) {
+    tier = 'blocked';
+    reasons.push(`возвраты/споры: ${c.problems.k} из ${c.problems.n} продаж (не меньше ${pc(c.problems.lo)})`);
+  }
+  if (!tier && n < P.minAttempts) {
+    tier = 'probation';
+    reasons.push(`испытательный срок: ${n} попыток закупки из ${P.minAttempts} нужных`);
+  }
+  if (!tier) {
+    const problemsOk = c.problems.n === 0 ? false : c.problems.hi <= P.trustedProblemHi;
+    if (c.stock.lo >= P.trustedLo && c.price.lo >= P.trustedLo && problemsOk) tier = 'trusted';
+    else {
+      tier = 'normal';
+      if (c.stock.lo < P.trustedLo) reasons.push(`наличие подтверждается не меньше чем в ${pc(c.stock.lo)} попыток (нужно ${pc(P.trustedLo)} для «надёжного»)`);
+      if (c.price.lo < P.trustedLo) reasons.push(`цена совпадает не меньше чем в ${pc(c.price.lo)} попыток`);
+      if (!problemsOk) reasons.push(c.problems.n ? `доля возвратов может достигать ${pc(c.problems.hi)}` : 'нет своих продаж из этого источника');
+    }
+  }
+  const limitFactor = tier === 'trusted' ? 1 : tier === 'normal' ? P.normalLimitFactor : tier === 'probation' ? P.probationLimitFactor : 0;
+  const marginBufferPct = tier === 'trusted' ? 0 : tier === 'normal' ? P.normalBufferPct : tier === 'probation' ? P.probationBufferPct : 0;
+  return { enabled: P.enabled, tier, limitFactor, marginBufferPct, reasons, scope, bounds: { stock: c.stock, price: c.price, problems: c.problems }, byCategory: Boolean(useCat) };
 }

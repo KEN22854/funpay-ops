@@ -46,6 +46,29 @@ export const DEFAULT_SETTINGS = {
   demand: { minSnapshots: 6, minObservationHours: 24, minOwnSales: 5 },
   /** Paper trading: «бумажные» позиции по рекомендациям, закрытие по рыночной переоценке */
   paper: { enabled: true, horizonDays: 7 },
+  /**
+   * Политики качества источников: решения по нижней/верхней границе 95% интервала Уилсона,
+   * а не по точечной оценке — 3 удачные попытки из 3 не делают источник надёжным.
+   */
+  sourcePolicy: {
+    enabled: true,
+    /** меньше попыток закупки — испытательный срок */
+    minAttempts: 5,
+    /** надёжный: нижние границы точности цены и наличия не ниже */
+    trustedLo: 0.85,
+    /** надёжный: верхняя граница доли возвратов/споров не выше */
+    trustedProblemHi: 0.15,
+    /** блок: даже оптимистичная (верхняя) граница точности цены или наличия ниже */
+    blockHi: 0.5,
+    /** блок: даже пессимистичная (нижняя) граница доли проблемных продаж выше */
+    blockProblemLo: 0.2,
+    /** множитель лимитов доли капитала и суммы сделки */
+    probationLimitFactor: 0.5,
+    normalLimitFactor: 0.75,
+    /** дополнительная требуемая маржа (чистыми от цены), п.п. */
+    probationBufferPct: 5,
+    normalBufferPct: 2,
+  },
   notify: { enabled: false, chatIds: [], minNet: 100, competitorDropPct: 10, sourceDownMin: 30 },
   backup: { enabled: true, everyH: 24, keep: 14 },
 };
@@ -119,6 +142,45 @@ export function updateSettings(patch) {
     }
   });
   return next;
+}
+
+/**
+ * Параметры, действовавшие в момент ts (по истории изменений): ключ берётся из последней записи
+ * истории не позже ts, иначе — значение по умолчанию. Для бэктеста без заглядывания в будущее.
+ * Возвращает функцию at(ts) — история читается один раз.
+ * @param {string} [asOf] учитывать только изменения, сделанные не позже asOf
+ */
+export function settingsTimeline(asOf = nowIso()) {
+  const rows = all('SELECT key, value, changed_at FROM settings_history WHERE changed_at <= ? ORDER BY changed_at, id', asOf);
+  const byKey = new Map();
+  for (const r of rows) {
+    let v;
+    try {
+      v = JSON.parse(r.value);
+    } catch {
+      continue;
+    }
+    if (!byKey.has(r.key)) byKey.set(r.key, []);
+    byKey.get(r.key).push({ ts: r.changed_at, v });
+  }
+  const cache = new Map();
+  const at = (ts) => {
+    const stored = {};
+    let sig = '';
+    for (const [k, list] of byKey) {
+      let idx = -1;
+      for (let i = 0; i < list.length && list[i].ts <= ts; i++) idx = i;
+      if (idx >= 0) stored[k] = list[idx].v;
+      sig += k + idx + ';';
+    }
+    if (!cache.has(sig)) cache.set(sig, validate(coerce(DEFAULT_SETTINGS, deepMerge(DEFAULT_SETTINGS, stored))));
+    return cache.get(sig);
+  };
+  return { at, changes: rows.length };
+}
+
+export function settingsAt(ts, asOf) {
+  return settingsTimeline(asOf).at(ts);
 }
 
 export function settingsHistory(limit = 200) {

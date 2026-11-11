@@ -4,6 +4,7 @@ import { useStore } from '../store/useStore';
 import { api } from '../lib/api';
 
 const NAV = [
+  { to: '/decisions', label: 'Что делать' },
   { to: '/scanner', label: 'Сканер выгоды' },
   { to: '/inventory', label: 'Склад и финансы' },
   { to: '/quality', label: 'Качество и риск' },

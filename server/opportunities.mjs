@@ -11,7 +11,7 @@ import { anomalies, changes, liquidity, series } from './repo/history.mjs';
 import { ownSalesStats } from './repo/inventory.mjs';
 import { capitalSnapshot, checkLimits, learnedLossPct } from './repo/risk.mjs';
 import { priceBands, sellProbability } from './repo/demand.mjs';
-import { sourceQuality } from './repo/quality.mjs';
+import { sourcePolicy, sourceQuality } from './repo/quality.mjs';
 import { openPaper } from './repo/paper.mjs';
 import { getSettings, settingsHash } from './repo/settings.mjs';
 import { discoveries, results, watches } from './repo/watches.mjs';
@@ -45,6 +45,10 @@ export function buildOpportunities({ log = false, only = null } = {}) {
   const bandsItem = memo((item) => priceBands({ item }));
   const lossSrc = memo((src) => learnedLossPct({ sourceId: src }));
   const lossCat = memo((cat) => learnedLossPct({ category: cat }));
+  const policy = memo((key) => {
+    const [src, cat] = key.split('\u0000');
+    return sourcePolicy(src, { category: cat || undefined }, S);
+  });
   // последняя перепроверка по каждой связке — одним запросом
   const verif = new Map(all('SELECT v.* FROM verifications v JOIN (SELECT opp_id, max(id) id FROM verifications GROUP BY opp_id) x ON x.id = v.id').map((v) => [v.opp_id, v]));
   // связки, подтверждённые своей сделкой: куплено по рекомендации и есть продажа
@@ -58,6 +62,8 @@ export function buildOpportunities({ log = false, only = null } = {}) {
     const learned = bySrc.n > 0 ? bySrc : lossCat(item.category);
     const di = demandItem(item.name);
     const demand = di.enough ? di : demandCat(item.category);
+    const pol = buy.manual && !buy.sourceId ? null : policy(`${buy.sourceId}\u0000${item.category ?? ''}`);
+    const limitFactor = pol?.enabled ? pol.limitFactor : 1;
     return evaluate({
       item,
       buy,
@@ -72,7 +78,8 @@ export function buildOpportunities({ log = false, only = null } = {}) {
       bands: bandsItem(item.name),
       learnedLoss: learned,
       compliance: item.compliance,
-      capital: checkLimits({ cost: buy.priceRub, item: item.name, sourceId: buy.sourceId, category: item.category }, snap),
+      capital: checkLimits({ cost: buy.priceRub, item: item.name, sourceId: buy.sourceId, category: item.category, limitFactor: pol?.tier === 'blocked' ? 1 : limitFactor }, snap),
+      policy: pol,
       verification: verif.get(id) ?? null,
     });
   };

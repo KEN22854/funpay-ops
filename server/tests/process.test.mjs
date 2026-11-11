@@ -149,4 +149,40 @@ describe('серверный режим (VPS)', () => {
       srv.kill();
     }
   }, 20_000);
+
+  it('сессия переживает перезапуск сервера; отзыв и выход закрывают её', async () => {
+    const PORT = 5990 + Math.floor(Math.random() * 9);
+    const token = 'test-token-very-long-1234567890';
+    const dir = tmp();
+    const start = async () => {
+      const srv = spawn(process.execPath, [join(ROOT, 'server/index.mjs')], { env: cleanEnv({ FPO_DATA_DIR: dir, FPO_PORT: String(PORT), FPO_AUTH_TOKEN: token }), stdio: ['ignore', 'pipe', 'pipe'] });
+      await new Promise((r) => srv.stdout.on('data', (d) => String(d).includes('FunPay Ops') && r()));
+      return srv;
+    };
+    const stop = (srv) => new Promise((r) => (srv.once('exit', r), srv.kill()));
+    const b = `http://127.0.0.1:${PORT}`;
+    const H = { 'Content-Type': 'application/json', 'X-FPO-Client': '1' };
+    const loginCookie = async () => (await fetch(`${b}/api/login`, { method: 'POST', headers: H, body: JSON.stringify({ token }) })).headers.get('set-cookie').split(';')[0];
+    let srv = await start();
+    try {
+      const c1 = await loginCookie();
+      const c2 = await loginCookie();
+      await stop(srv);
+      srv = await start();
+      // после перезапуска обе сессии действуют
+      expect((await fetch(`${b}/api/watches`, { headers: { Cookie: c1 } })).status).toBe(200);
+      const list = await (await fetch(`${b}/api/sessions`, { headers: { Cookie: c1 } })).json();
+      expect(list.sessions).toHaveLength(2);
+      expect(list.sessions.filter((s) => s.current)).toHaveLength(1);
+      expect(JSON.stringify(list)).not.toContain(c1.split('=')[1]); // сам идентификатор наружу не отдаётся
+      // «выйти на других устройствах» закрывает c2, c1 остаётся
+      const r = await (await fetch(`${b}/api/sessions/others/revoke`, { method: 'POST', headers: { ...H, Cookie: c1 }, body: '{}' })).json();
+      expect(r.revoked).toBe(1);
+      expect((await fetch(`${b}/api/watches`, { headers: { Cookie: c2 } })).status).toBe(401);
+      await fetch(`${b}/api/logout`, { method: 'POST', headers: { ...H, Cookie: c1 }, body: '{}' });
+      expect((await fetch(`${b}/api/watches`, { headers: { Cookie: c1 } })).status).toBe(401);
+    } finally {
+      srv.kill();
+    }
+  }, 40_000);
 });

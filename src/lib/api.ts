@@ -92,6 +92,9 @@ export interface WatchAttrs {
   floatMin: number | null;
   floatMax: number | null;
   server: string;
+  paintSeeds: number[];
+  stickers: string[];
+  durationDays: number | null;
 }
 
 export interface Watch {
@@ -176,6 +179,7 @@ export interface Opportunity {
     /** theoretical — по котировкам; executable — перепроверено и наличие подтверждено */
     verification: 'theoretical' | 'executable';
     executionGaps: string[];
+    policy?: { tier: PolicyTier; limitFactor: number; marginBufferPct: number; scope: string; reasons: string[] } | null;
     netPerDay: number | null;
     sellProb7: { p: number; lo: number; hi: number } | null;
     liquidityBasis: string;
@@ -314,6 +318,18 @@ export interface ServerSettings {
   matching: { skinsStrict: 'all' | 'pattern' };
   demand: { minSnapshots: number; minObservationHours: number; minOwnSales: number };
   paper: { enabled: boolean; horizonDays: number };
+  sourcePolicy: {
+    enabled: boolean;
+    minAttempts: number;
+    trustedLo: number;
+    trustedProblemHi: number;
+    blockHi: number;
+    blockProblemLo: number;
+    probationLimitFactor: number;
+    normalLimitFactor: number;
+    probationBufferPct: number;
+    normalBufferPct: number;
+  };
   inventory: { costMethod: 'fifo' | 'avg'; allowNegative: boolean; startingCapital: number; maxPurchaseRub: number; lowStockQty: number };
   analytics: { abcA: number; abcB: number; xyzX: number; xyzY: number };
   notify: { enabled: boolean; chatIds: string[]; minNet: number; competitorDropPct: number; sourceDownMin: number };
@@ -409,6 +425,9 @@ export interface Backup {
   verify_ok: number | null;
   verify_detail: { integrity?: string; counts?: Record<string, number>; error?: string } | null;
   exists: boolean;
+  encrypted_file?: string | null;
+  drill_at?: string | null;
+  drill_ok?: number | null;
 }
 
 export interface Diagnostics {
@@ -456,8 +475,72 @@ export interface StrategyStats {
   forecastMae: number | null;
 }
 
+export interface Decision {
+  id: string;
+  priority: 1 | 2 | 3;
+  kind: 'buy' | 'verify' | 'match' | 'fee' | 'loss' | 'stale' | 'transit' | 'reserve' | 'source' | 'data' | 'capital' | 'strategy';
+  title: string;
+  detail: string;
+  impactRub: number | null;
+  action: { label: string; to: string };
+}
+
+export type PolicyTier = 'trusted' | 'normal' | 'probation' | 'blocked';
+export interface WilsonBound {
+  k: number;
+  n: number;
+  p: number | null;
+  lo: number;
+  hi: number;
+}
+export interface SourcePolicy {
+  enabled: boolean;
+  tier: PolicyTier;
+  limitFactor: number;
+  marginBufferPct: number;
+  reasons: string[];
+  scope: string;
+  byCategory: boolean;
+  bounds: { stock: WilsonBound; price: WilsonBound; problems: WilsonBound };
+}
+
+export interface BacktestParams {
+  horizonDays: number;
+  minNet: number;
+  minRoiPct: number;
+  sinceDays: number;
+  mode: 'historical' | 'current';
+  simulation: 'realistic' | 'proxy';
+  budgetRub: number;
+  maxConcurrent: number;
+  deliveryDelayH: number;
+  refundPct: number;
+}
+type BtGroup = Record<string, { trades: number; net: number; invested: number; roiPct: number | null; winRate: number | null }>;
+export interface BacktestResult {
+  params: BacktestParams & { asOf: string };
+  engineVersion: string;
+  settingsHash: string;
+  inputFingerprint: string;
+  strategies: Record<string, StrategyStats>;
+  breakdown: Record<string, { byItem: BtGroup; bySource: BtGroup; byCategory: BtGroup; byRegime: BtGroup }>;
+  trades: { watch: string; source: string; category: string; regime: string; strategy: string; entry: string; exit: string; plannedPrice: number; exitPrice: number; forecastNet: number; net: number; fillProbability: number | null }[];
+  skippedNoExit: number;
+  skippedStale: number;
+  skippedOutOfStock: number;
+  skippedBudget: Record<string, number>;
+  skippedConcurrency: Record<string, number>;
+  note: string;
+}
+
+export type VerifyOutcome = 'ok' | 'incomplete' | 'failed' | 'blocked';
+
 export interface VerifyResult {
   ok: boolean;
+  /** ok — цена и наличие; incomplete — цена ок, наличие неизвестно; failed — цена не подтверждена; blocked — нет в наличии */
+  result: VerifyOutcome;
+  reasons: string[];
+  priceOk: boolean;
   quoted: number;
   fresh: number | null;
   stock: number | null;
@@ -566,6 +649,15 @@ export const api = {
 
   audit: () => call<{ id: number; ts: string; action: string; entity: string; entity_id: string | null; details: unknown }[]>('GET', '/audit'),
   backups: () => call<Backup[]>('GET', '/backups'),
+  restoreDrill: () => call<{ ok: boolean; file: string; source?: string; ms: number; error?: string }>('POST', '/backups/drill', {}),
+  encryptBackup: (file: string) => call<{ file: string; external: boolean }>('POST', `/backups/${encodeURIComponent(file)}/encrypt`, {}),
+  sessions: () =>
+    call<{ enabled: boolean; policy: { ttlDays: number; idleDays: number }; sessions: { id: string; created_at: string; last_seen: string; expires_at: string; ip: string | null; user_agent: string | null; current: boolean }[] }>('GET', '/sessions'),
+  revokeSession: (id: string) => call<{ ok: true }>('POST', `/sessions/${id}/revoke`, {}),
+  revokeOtherSessions: () => call<{ revoked: number }>('POST', '/sessions/others/revoke', {}),
+  opsMetrics: () =>
+    call<{ since: string; uptimeSec: number; total: number; errors: number; errorRate: number; memoryMb: number; routes: { route: string; count: number; errors: number; clientErrors: number; errorRate: number; p50: number | null; p95: number | null; max: number | null; last: string | null }[] }>('GET', '/ops/metrics'),
+  opsErrors: () => call<{ id: number; ts: string; method: string; route: string; status: number; message: string }[]>('GET', '/ops/errors'),
   createBackup: () => call<{ file: string; verify: { ok: boolean } }>('POST', '/backups'),
   verifyBackup: (file: string) => call<{ ok: boolean }>('POST', `/backups/${encodeURIComponent(file)}/verify`),
   restoreBackup: (file: string) => call<{ restored: string; safetyCopy: string }>('POST', `/backups/${encodeURIComponent(file)}/restore`, { confirm: file }),
@@ -585,6 +677,7 @@ export const api = {
           price: { attempts: number; medianDeviationPct: number | null; accuracy: number | null };
           stock: { attempts: number; accuracy: number | null };
           fulfillment: { sales: number; problemRate: number | null };
+          policy: SourcePolicy;
         }
       >
     >('GET', '/quality/sources'),
@@ -604,14 +697,12 @@ export const api = {
     }>('GET', `/risk?mode=${mode}`),
   reserveCash: (b: { amount: number; item?: string; note?: string; mode: Mode }) => fin<{ id: string }>('/cash/reserve', b),
   releaseCash: (id: string) => fin<{ ok: true }>(`/cash/reserve/${id}/release`, {}),
+  decisions: () => call<{ decisions: Decision[]; summary: { total: number; byPriority: Record<'1' | '2' | '3', number>; buyNowRub: number; unlockRub: number; atRiskRub: number; freeCash: number | null } }>('GET', '/decisions'),
   paper: () => call<{ byStrategy: Record<string, StrategyStats>; recent: { id: string; item: string; strategy: string; opened_at: string; status: string; planned_price: number; forecast_net: number; exit_price: number | null; exit_net: number | null }[] }>('GET', '/paper'),
-  backtest: (b: { horizonDays: number; minNet: number; minRoiPct: number; sinceDays: number }) =>
-    call<{ params: Record<string, number>; engineVersion: string; settingsHash: string; strategies: Record<string, StrategyStats>; trades: { watch: string; source: string; strategy: string; entry: string; exit: string; plannedPrice: number; exitPrice: number; forecastNet: number; net: number }[]; skippedNoExit: number; note: string }>(
-      'POST',
-      '/backtest',
-      b,
-    ),
-  backtestRuns: () => call<{ id: number; ts: string; engine_version: string; settings_hash: string; params: Record<string, number>; result: { strategies: Record<string, StrategyStats> } }[]>('GET', '/backtest'),
+  backtest: (b: BacktestParams) => call<BacktestResult>('POST', '/backtest', b),
+  backtestReplay: (id: number) => call<{ reproducible: boolean; replay: BacktestResult }>('POST', `/backtest/${id}/replay`, {}),
+  backtestRuns: () =>
+    call<{ id: number; ts: string; engine_version: string; settings_hash: string; input_fingerprint: string | null; mode: string | null; params: Partial<BacktestParams> & Record<string, unknown>; result: { strategies: Record<string, StrategyStats> } }[]>('GET', '/backtest'),
   productMetrics: (q: string) =>
     call<{
       precision: { value: number | null; known: number; profitable: number; purchased: number };

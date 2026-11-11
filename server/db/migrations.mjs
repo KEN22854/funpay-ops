@@ -279,4 +279,40 @@ CREATE TABLE backtest_runs (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, engine_ver
 ALTER TABLE paper_positions ADD COLUMN params TEXT;
 `,
   },
+  {
+    version: 4,
+    name: 'verify-result-sessions-errors',
+    sql: `
+-- исход перепроверки: ok | incomplete | failed | blocked; цена подтверждена отдельно от наличия
+ALTER TABLE verifications ADD COLUMN result TEXT;
+ALTER TABLE verifications ADD COLUMN price_ok INTEGER;
+ALTER TABLE verifications ADD COLUMN reasons TEXT;
+UPDATE verifications SET result = CASE WHEN ok = 1 THEN 'ok' ELSE 'failed' END, price_ok = ok WHERE result IS NULL;
+
+-- бэктест: режим параметров и отпечаток входных данных
+ALTER TABLE backtest_runs ADD COLUMN mode TEXT;
+ALTER TABLE backtest_runs ADD COLUMN input_fingerprint TEXT;
+
+-- постоянные сессии серверного режима (храним только хэш токена)
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  ip TEXT,
+  user_agent TEXT,
+  revoked_at TEXT
+);
+
+-- зашифрованные копии (AES-256-GCM) и учения по восстановлению
+ALTER TABLE backups ADD COLUMN encrypted_file TEXT;
+ALTER TABLE backups ADD COLUMN drill_at TEXT;
+ALTER TABLE backups ADD COLUMN drill_ok INTEGER;
+ALTER TABLE backups ADD COLUMN drill_detail TEXT;
+
+-- журнал ошибок API (без тел запросов и секретов)
+CREATE TABLE error_log (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, method TEXT, route TEXT, status INTEGER, message TEXT);
+CREATE INDEX error_log_ts ON error_log(ts);
+`,
+  },
 ];

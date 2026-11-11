@@ -8,7 +8,21 @@ import { CATEGORY_LABEL, MATCH_LABEL, MATCH_TONE, type ScannerState } from './us
 
 type Draft = Omit<Watch, 'id' | 'createdAt'> & { id?: string };
 
-const EMPTY_ATTRS: WatchAttrs = { platform: '', regions: [], type: '', edition: '', phase: '', requireFloat: false, floatMin: null, floatMax: null, server: '' };
+const EMPTY_ATTRS: WatchAttrs = { platform: '', regions: [], type: '', edition: '', phase: '', requireFloat: false, floatMin: null, floatMax: null, server: '', paintSeeds: [], stickers: [], durationDays: null };
+
+/** что определяет «тот же товар» в категории (совпадает со схемами сервера) */
+const SCHEMA_HINT: Partial<Record<Category, { required: (keyof WatchAttrs)[]; note: string }>> = {
+  keys: { required: ['type', 'platform', 'regions'], note: 'тип (ключ/подарок), платформа и регион активации; издание — если цена зависит' },
+  subscriptions: { required: ['durationDays', 'regions'], note: 'срок подписки и регион' },
+  currency: { required: ['server'], note: 'сервер/регион игры' },
+  accounts: { required: ['platform', 'regions'], note: 'платформа и регион аккаунта' },
+};
+const ATTR_LABEL: Partial<Record<keyof WatchAttrs, string>> = { type: 'тип', platform: 'платформа', regions: 'регион', durationDays: 'срок', server: 'сервер' };
+const missingAttrs = (c: Category, a: WatchAttrs) =>
+  (SCHEMA_HINT[c]?.required ?? []).filter((k) => {
+    const v = a[k];
+    return v === null || v === '' || (Array.isArray(v) && v.length === 0);
+  });
 
 const blank = (): Draft => ({
   name: '',
@@ -397,6 +411,12 @@ function WatchForm({ sc, draft, setDraft, onSave, busy }: { sc: ScannerState; dr
           <div className="rounded-lg border border-accent/30 bg-accent/5 p-3">
             <span className="label">Обязательные характеристики</span>
             <p className="mb-2 text-xs text-muted">Несовпадение → «не совпадает» (блок). Не указано у продавца → «проверить». Рекомендация — только при полном совпадении.</p>
+            {SCHEMA_HINT[draft.category] && (
+              <p className={`mb-2 text-xs ${missingAttrs(draft.category, draft.attrs).length ? 'text-warn' : 'text-good'}`}>
+                Для категории важны: {SCHEMA_HINT[draft.category]!.note}.
+                {missingAttrs(draft.category, draft.attrs).length > 0 && ` Не задано: ${missingAttrs(draft.category, draft.attrs).map((k) => ATTR_LABEL[k] ?? k).join(', ')} — пары будут сверяться только по названию.`}
+              </p>
+            )}
             {draft.category === 'skins' ? (
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block">
@@ -414,6 +434,20 @@ function WatchForm({ sc, draft, setDraft, onSave, busy }: { sc: ScannerState; dr
                 <label className="block">
                   <span className="label">Float до</span>
                   <input className="input num" inputMode="decimal" placeholder="0.18" value={draft.attrs.floatMax ?? ''} onChange={(e) => updA({ floatMax: e.target.value === '' ? null : Number(e.target.value.replace(',', '.')) })} />
+                </label>
+                <label className="block">
+                  <span className="label">Paint seed (через запятую)</span>
+                  <input
+                    className="input num"
+                    placeholder="661, 670"
+                    key={`ps-${draft.id ?? 'new'}`}
+                    defaultValue={draft.attrs.paintSeeds.join(', ')}
+                    onBlur={(e) => updA({ paintSeeds: e.target.value.split(/[,\s]+/).filter(Boolean).map(Number).filter((x) => Number.isInteger(x) && x >= 0 && x <= 1000) })}
+                  />
+                </label>
+                <label className="block">
+                  <span className="label">Обязательные наклейки</span>
+                  <input className="input" placeholder="Titan Katowice 2014" key={`st-${draft.id ?? 'new'}`} defaultValue={draft.attrs.stickers.join(', ')} onBlur={(e) => updA({ stickers: e.target.value.split(',').map((x) => x.trim()).filter(Boolean) })} />
                 </label>
                 <p className="text-xs text-muted sm:col-span-2">
                   Лоты FunPay с указанным float вне диапазона не учитываются в цене конкурентов. У площадок-источников float в выгрузках нет — такие пары подтверждаются вручную.
@@ -470,6 +504,25 @@ function WatchForm({ sc, draft, setDraft, onSave, busy }: { sc: ScannerState; dr
                   </div>
                   <span className="mt-1 block text-xs text-muted">Global подходит к любому выбранному региону.</span>
                 </div>
+                {draft.category === 'subscriptions' && (
+                  <label className="block">
+                    <span className="label">Срок подписки</span>
+                    <select className="input" value={draft.attrs.durationDays ?? ''} onChange={(e) => updA({ durationDays: e.target.value ? Number(e.target.value) : null })}>
+                      <option value="">не проверять</option>
+                      {[
+                        [7, '7 дней'],
+                        [30, '1 месяц'],
+                        [90, '3 месяца'],
+                        [180, '6 месяцев'],
+                        [365, '12 месяцев'],
+                      ].map(([v, l]) => (
+                        <option key={v} value={v}>
+                          {l}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {draft.category === 'currency' && (
                   <label className="block sm:col-span-3">
                     <span className="label">Сервер</span>
